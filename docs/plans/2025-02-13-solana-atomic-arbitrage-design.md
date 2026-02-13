@@ -207,6 +207,10 @@ Byte 2:       sell_dex_type (0-34)
 Byte 3:       flags (packed bits)
               ├─ bit 0: is_buy_token_a
               ├─ bit 1: is_sell_token_a
+              ├─ bit 2: buy_token_is_2022
+              ├─ bit 3: sell_token_is_2022
+              ├─ bit 4: use_flashloan
+              ├─ bit 5: no_failure_mode (succeed silently if no profit)
               └─ bit 7: is_simulate
 Bytes 4-11:   amount_in (u64 LE)
 Bytes 12-15:  min_profit (u32 LE)
@@ -219,28 +223,45 @@ Bytes 12-15:  min_profit (u32 LE)
 ### 3.3 Account Layout
 
 ```
-┌─────────── Header (shared, passed once) ────────────┐
-│ [0] Payer (signer)                                   │
-│ [1] Base mint (WSOL)                                 │
-│ [2] User base token account                          │
-│ [3] SPL Token Program                                │
-│ [4] Token-2022 Program                               │
-│ [5] Memo Program                                     │
-│ [6..6+N] Per intermediate token: (mint, program, ata)│
-└──────────────────────────────────────────────────────┘
-┌─────── Pool Accounts (sequential) ───────────────────┐
-│ [hop1] pool_accounts[0..buy_count]                   │
-│ [hop2] pool_accounts[0..sell_count]                  │
-│ ...                                                  │
-└──────────────────────────────────────────────────────┘
+┌─────────── Header (shared, passed once) ────────────────────┐
+│ [0] Payer (signer)                                           │
+│ [1] Base mint (WSOL, or USDC/USD1 in flashloan mode)         │
+│ [2] User base token account                                  │
+│ [3] Fee collector (profit destination, randomly rotated)      │
+│ [4] SPL Token Program                                        │
+│ [5] Token-2022 Program                                       │
+│ [6] Memo Program                                             │
+│ [7] Associated Token Program (for lazy ATA creation)          │
+│ [8] System Program                                            │
+│ [9..9+N] Per intermediate token: (mint, token_program, ata)   │
+├───────────── Optional: Flashloan Extension ─────────────────┤
+│ [+0] Vault authority (PDA)                                    │
+│ [+1] Vault token account                                      │
+├───────────── Optional: Bridge Extension (mixed-mode) ───────┤
+│ [+0] Stable mint (USDC or USD1)                               │
+│ [+1] User stable token account                                │
+│ [+2] Bridge pool program ID                                   │
+│ [+3] Bridge pool authority                                    │
+│ [+4] Sysvar Instructions                                      │
+│ [+5] Bridge pool state                                        │
+│ [+6] Bridge vault A                                           │
+│ [+7] Bridge vault B                                           │
+└──────────────────────────────────────────────────────────────┘
+┌─────── Pool Accounts (sequential) ───────────────────────────┐
+│ [hop1] pool_accounts[0..hop1_count]                           │
+│ [hop2] pool_accounts[0..hop2_count]                           │
+│ ...                                                           │
+└──────────────────────────────────────────────────────────────┘
 ```
 
 Account splitting uses chained `split_at()` calls with `POOL_COUNTS[dex_type]` constant lookup. Zero traversal, zero search.
 
 **Header sizes:**
-- 2-hop: 9 accounts (6 base + 3 for intermediate token)
-- 3-hop: 12 accounts (6 base + 3 × 2 intermediate tokens)
-- 4-hop: 15 accounts (6 base + 3 × 3 intermediate tokens)
+- 2-hop: 12 accounts (9 base + 3 for intermediate token)
+- 3-hop: 15 accounts (9 base + 3 × 2 intermediate tokens)
+- 4-hop: 18 accounts (9 base + 3 × 3 intermediate tokens)
+- +2 if flashloan enabled
+- +8 if mixed-mode bridge needed
 
 ### 3.4 Execution Flow (2-hop example)
 
@@ -335,6 +356,24 @@ enum ArbError {
 ```
 
 4 error variants only. No account validation, no owner checks, no PDA derivation. All validation responsibility is off-chain.
+
+### 3.8 No-Failure Mode
+
+When `no_failure_mode` flag is set (bit 5 of flags byte), the program succeeds silently when no profitable arbitrage is found, instead of reverting with `ArbitrageFailed`.
+
+```rust
+// In profit verification:
+if final_bal <= initial + params.min_profit as u64 {
+    if params.no_failure_mode {
+        return Ok(()); // Succeed silently, no swap happened worth keeping
+    }
+    return Err(ArbitrageFailed.into());
+}
+```
+
+**Use case**: Speculative transactions sent during uncertain conditions. Without this flag, every unprofitable attempt costs Jito tip (bundle landed but reverted). With this flag, the transaction lands successfully but does nothing — still costs base fee but avoids the appearance of failed transactions in on-chain logs.
+
+**Default**: Off. Only enable when the expected hit rate is low and you want to avoid failure noise.
 
 ---
 
@@ -1147,17 +1186,25 @@ This is detected once per mint during pool initialization by checking the mint a
 
 ### 10.2 Memo Program Injection
 
-CLMM-style pools (DLMM, Whirlpool, Raydium CLMM, PancakeSwap, Byreal, Stabble CLMM) require the **Memo Program** as an additional account when the token uses Token-2022. AMM-style pools do NOT need it.
+CLMM-style pools require the **Memo Program** as an additional account. The rules differ per DEX:
+
+- **Whirlpool**: **ALWAYS** needs Memo Program, regardless of token type
+- **DLMM, Raydium CLMM, PancakeSwap, Byreal, Stabble CLMM**: Need Memo Program **only when token uses Token-2022**
+- **AMM-style pools**: Never need Memo Program
 
 ```rust
 // Conditional memo injection during account assembly
 fn needs_memo_program(dex_type: u8, token_program: &Pubkey) -> bool {
-    if *token_program == spl_token::ID {
-        return false; // Standard SPL Token never needs memo
+    // Whirlpool ALWAYS needs memo, regardless of token program
+    if dex_type == DEX_WHIRLPOOL {
+        return true;
     }
-    // Token-2022: only CLMM-style pools need memo
+    // Other CLMM pools: only when Token-2022
+    if *token_program == spl_token::ID {
+        return false;
+    }
     matches!(dex_type,
-        DEX_METEORA_DLMM | DEX_WHIRLPOOL | DEX_RAYDIUM_CLMM |
+        DEX_METEORA_DLMM | DEX_RAYDIUM_CLMM |
         DEX_PANCAKESWAP | DEX_BYREAL | DEX_STABBLE_CLMM
     )
 }
@@ -1300,22 +1347,24 @@ pub fn ensure_ata(
 The header already includes per-hop token accounts. The Associated Token Program + System Program must be in the header for lazy creation:
 
 ```
-Updated Header:
+Updated Header (canonical, see Section 3.3 for full layout):
   [0] Payer (signer)
   [1] Base mint (WSOL)
   [2] User base token account
-  [3] SPL Token Program
-  [4] Token-2022 Program
-  [5] Memo Program
-  [6] Associated Token Program        ← needed for lazy ATA
-  [7] System Program                  ← needed for lazy ATA
-  [8..8+N] Per intermediate token: (mint, token_program_for_mint, ata)
+  [3] Fee collector
+  [4] SPL Token Program
+  [5] Token-2022 Program
+  [6] Memo Program
+  [7] Associated Token Program        ← needed for lazy ATA
+  [8] System Program                  ← needed for lazy ATA
+  [9..9+N] Per intermediate token: (mint, token_program_for_mint, ata)
 ```
 
 **Header sizes (updated):**
-- 2-hop: 11 accounts (8 base + 3 for intermediate token)
-- 3-hop: 14 accounts (8 base + 3 × 2 intermediate tokens)
-- 4-hop: 17 accounts (8 base + 3 × 3 intermediate tokens)
+- 2-hop: 12 accounts (9 base + 3 for intermediate token)
+- 3-hop: 15 accounts (9 base + 3 × 2 intermediate tokens)
+- 4-hop: 18 accounts (9 base + 3 × 3 intermediate tokens)
+- +2 if flashloan, +8 if mixed-mode bridge
 
 ---
 
@@ -1456,9 +1505,12 @@ Without jitter, every 2-hop transaction has identical CU limit = trivially finge
 
 const FEE_COLLECTORS_SOL: [Pubkey; 3] = [/* 3 different addresses */];
 const FEE_COLLECTOR_USDC: Pubkey = /* dedicated USDC collector */;
+const FEE_COLLECTOR_FLASHLOAN: Pubkey = /* dedicated flashloan collector */;
 
-fn select_fee_collector(base_mint: &Pubkey) -> Pubkey {
-    if *base_mint == USDC_MINT {
+fn select_fee_collector(base_mint: &Pubkey, use_flashloan: bool) -> Pubkey {
+    if use_flashloan {
+        FEE_COLLECTOR_FLASHLOAN  // Flashloan has its own collector
+    } else if *base_mint == USDC_MINT {
         FEE_COLLECTOR_USDC
     } else {
         FEE_COLLECTORS_SOL[rand::random::<usize>() % FEE_COLLECTORS_SOL.len()]
@@ -1559,6 +1611,17 @@ These go into the Tier 0 ALT since they are static addresses.
 Two vault patterns (matching the reference implementation):
 
 ```rust
+fn select_vault(base_mint: &Pubkey) -> (Pubkey, usize) {
+    if *base_mint == USDC_MINT {
+        // USDC: always vault 0 (PDA-derived token account)
+        (FLASHLOAN_VAULT_AUTHORITIES[0], 0)
+    } else {
+        // SOL: randomly select between 2 vaults (anti-fingerprinting)
+        let idx = rand::random::<usize>() % FLASHLOAN_VAULT_AUTHORITIES.len();
+        (FLASHLOAN_VAULT_AUTHORITIES[idx], idx)
+    }
+}
+
 fn derive_vault_token_account(vault_index: usize, base_mint: &Pubkey) -> Pubkey {
     if vault_index == 0 {
         // Vault 0: PDA-derived
@@ -1630,6 +1693,8 @@ With flashloan:
 ## 15. DEX-Specific Special Handling
 
 Several DEXes require protocol-specific handling beyond standard CPI.
+
+> **Implementation note**: Detailed per-DEX specs (exact byte offsets for pool parsing, complete account sequences, PDA derivation seeds, instruction discriminators) will be documented in separate files under `docs/dex/` during implementation. Each DEX gets its own spec file (e.g., `docs/dex/pump-fun.md`, `docs/dex/raydium-clmm.md`).
 
 ### 15.1 Pump.fun Ecosystem
 
