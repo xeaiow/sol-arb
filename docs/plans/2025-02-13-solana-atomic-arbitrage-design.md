@@ -13,6 +13,7 @@
 | Pool Data Source | gRPC Geyser real-time push |
 | Profit Calculation | Fully off-chain; on-chain is pure execution + verification |
 | Simulation | Skipped in production (Jito bundle failure = no cost) |
+| Address Lookup Table | Multi-tier ALT strategy (static + per-DEX + dynamic hot pool) |
 
 ## Reference Projects
 
@@ -128,6 +129,12 @@ onchain-arb/
 │       │   ├── tx_builder.rs       # Assemble instruction data + accounts
 │       │   ├── simulator.rs        # simulateTransaction (debug/test only)
 │       │   └── jito.rs             # Jito bundle gRPC submission
+│       │
+│       ├── alt/                    # Address Lookup Table management
+│       │   ├── mod.rs
+│       │   ├── manager.rs          # ALT creation, extension, deactivation, cleanup
+│       │   ├── selector.rs         # Greedy ALT selection per transaction
+│       │   └── index.rs            # Reverse index: account_address -> (alt, index)
 │       │
 │       └── utils/
 │           ├── mod.rs
@@ -546,20 +553,27 @@ Opportunity received
    - Gap > 2 slots → discard (state may have changed)
     │
     ▼
-2. tx_builder: assemble transaction (~0.05 ms)
+2. ALT selection (~0.01 ms)
+   - Collect all accounts needed for this route
+   - AltSelector greedy picks best 1-3 ALTs (Tier 0 always included)
+   - If NeedsEphemeral: queue Tier 3 creation, skip this opportunity
+    │
+    ▼
+3. tx_builder: assemble V0 transaction (~0.05 ms)
    - Select instruction (4/5/6 by hop_count)
    - Pack instruction data (<=24 bytes)
    - Arrange header accounts + pool accounts
+   - Compile with selected ALTs (Message::try_compile with address_lookup_tables)
    - Set compute budget (dynamic by hop_count)
     │
     ▼
-3. jito: send Bundle (~5-10 ms)
+4. jito: send Bundle (~5-10 ms)
    - Build Jito bundle (1 transaction + tip)
    - Submit to Jito block engine gRPC
    - Bundle failure = not landed = zero cost
     │
     ▼
-4. Result tracking + metrics
+5. Result tracking + metrics
 ```
 
 ### 6.3 Jito Bundle Sender
@@ -694,7 +708,352 @@ Provided by `dex-pinocchio-cpi` as a direct dependency for the on-chain program:
 
 ---
 
-## 9. Configuration
+## 9. Address Lookup Table (ALT) Strategy
+
+### 9.1 Why ALT Is Mandatory
+
+Solana transactions have a **1232-byte** size limit. Each account address costs 32 bytes without ALT, but only **1 byte** (index) with ALT.
+
+```
+Without ALT:
+  2-hop: 28 accounts × 32 = 896 bytes  → borderline
+  3-hop: 37 accounts × 32 = 1184 bytes → barely fits, no room for tip ix
+  4-hop: 50 accounts × 32 = 1600 bytes → ❌ exceeds limit
+
+With ALT:
+  4-hop: 50 accounts × 1 = 50 bytes + ALT ref (32 bytes) = 82 bytes ✅
+```
+
+**Without ALT, 3-hop is unreliable and 4-hop is impossible.** ALT is not optional.
+
+### 9.2 Multi-Tier ALT Architecture
+
+A single transaction can reference **up to 4 ALTs** (practical limit by tx size). We use a tiered strategy where each tier serves a different purpose:
+
+```
+┌─────────────────────────────────────────────────────┐
+│ Tier 0: Global Static ALT (1 table, never changes)  │
+│ - 35 DEX program IDs                                │
+│ - SPL Token Program, Token-2022, Memo, System       │
+│ - WSOL mint                                         │
+│ - Jito tip accounts (8)                             │
+│ - Our program ID                                    │
+│ - Common authorities (Raydium, Meteora, Orca...)    │
+│ ≈ 60 entries                                        │
+├─────────────────────────────────────────────────────┤
+│ Tier 1: Per-DEX Pool ALTs (up to 35 tables)         │
+│ - One ALT per major DEX                             │
+│ - Contains pool-specific accounts for that DEX      │
+│   (pool states, vaults, configs, oracles...)        │
+│ - Updated when new pools discovered                 │
+│ ≈ 200-256 entries each                              │
+├─────────────────────────────────────────────────────┤
+│ Tier 2: Hot Token ALTs (dynamic, rotated)            │
+│ - Per-token tables for high-frequency tokens        │
+│ - Contains all pool accounts across DEXes for       │
+│   that token's routes                               │
+│ - User's ATA for that token                         │
+│ ≈ 100-256 entries each                              │
+├─────────────────────────────────────────────────────┤
+│ Tier 3: Ephemeral ALTs (short-lived, opportunity)    │
+│ - Created on-demand for rare/exotic routes          │
+│ - Covers pools not in any existing ALT              │
+│ - Deactivated + closed after use to reclaim rent    │
+│ ≈ variable entries                                  │
+└─────────────────────────────────────────────────────┘
+```
+
+### 9.3 ALT Selection Per Transaction Scenario
+
+Each transaction selects **1-3 ALTs** depending on the route:
+
+#### Scenario A: 2-hop, both pools in common DEXes
+
+```
+Route: WSOL →[Raydium CLMM pool_X]→ TOKEN_A →[Meteora DLMM pool_Y]→ WSOL
+
+ALTs used:
+  1. Tier 0 (Global Static)     → program IDs, token programs, WSOL mint
+  2. Tier 1 (Raydium)           → pool_X accounts (pool_state, vaults, tick_arrays, config)
+  3. Tier 1 (Meteora DLMM)      → pool_Y accounts (pair, reserves, bin_arrays, oracle)
+
+Total ALT refs: 3 × 32 = 96 bytes
+Accounts via ALT index: ~28 × 1 = 28 bytes
+Remaining (signer, user ATAs): ~3 × 32 = 96 bytes (signers can't be in ALT)
+Total: 96 + 28 + 96 + ix_data ≈ 250 bytes ✅
+```
+
+#### Scenario B: 3-hop, high-frequency token
+
+```
+Route: WSOL →[pool_X]→ USDC →[pool_Y]→ TOKEN_B →[pool_Z]→ WSOL
+
+ALTs used:
+  1. Tier 0 (Global Static)     → program IDs, common addresses
+  2. Tier 2 (USDC Hot Token)    → all USDC-related pool accounts, USDC mint, user USDC ATA
+  3. Tier 1 (DEX for pool_Z)    → pool_Z specific accounts
+
+Total: ~3 ALTs, all accounts resolved via index ✅
+```
+
+#### Scenario C: 4-hop, mixed DEXes
+
+```
+Route: WSOL →[Raydium CP]→ A →[Orca Whirlpool]→ B →[Meteora CPMM]→ C →[Pump AMM]→ WSOL
+
+ALTs used:
+  1. Tier 0 (Global Static)     → program IDs, common addresses
+  2. Tier 2 (Token A Hot)       → if Token A is high-frequency, covers pools touching A
+  3. Tier 1 (DEX with most pools in route) → e.g., Meteora if it has most accounts
+
+Remaining pool accounts not in any ALT:
+  → Check if they fit as raw 32-byte addresses within tx size budget
+  → If not: create Tier 3 ephemeral ALT (async, may delay by 1 slot)
+```
+
+#### Scenario D: Exotic route, no ALT coverage
+
+```
+Route: WSOL →[Vertigo pool]→ RARE_TOKEN →[HumidiFi pool]→ WSOL
+
+Neither pool is in any Tier 1/2 ALT (low frequency DEXes, rare token).
+
+Strategy:
+  1. Tier 0 (Global Static)     → program IDs (Vertigo, HumidiFi are in here)
+  2. Try raw addresses           → 2 pools × ~6 accounts = 12 × 32 = 384 bytes
+     + header 9 × 32 = 288 bytes (minus those in Tier 0)
+     Total ≈ ~400 bytes → fits within 1232 ✅ (2-hop exotic routes usually fit)
+
+  If it doesn't fit (unlikely for 2-hop):
+  3. Create Tier 3 ephemeral ALT → adds 1 slot latency
+```
+
+#### Scenario E: New pool just discovered
+
+```
+gRPC detects new pool creation for TOKEN_X on Raydium CLMM.
+
+1. Pool accounts are NOT yet in any ALT
+2. First opportunity using this pool:
+   → Use Tier 0 + raw addresses if tx fits (likely for 2-hop)
+   → Queue ALT extension: add pool accounts to Tier 1 (Raydium) ALT
+3. ALT extension lands (~1-2 slots later)
+4. Subsequent opportunities use the updated ALT ✅
+
+This means new pool discovery has zero latency for 2-hop,
+and 1-2 slot warmup delay for 3/4-hop routes.
+```
+
+### 9.4 ALT Selection Algorithm
+
+```rust
+struct AltSelector {
+    global_alt: Pubkey,                              // Tier 0
+    dex_alts: HashMap<DexType, Pubkey>,              // Tier 1: dex_type -> ALT address
+    token_alts: HashMap<Pubkey, Pubkey>,             // Tier 2: mint -> ALT address
+    ephemeral_alts: LruCache<RouteSignature, Pubkey>, // Tier 3: route -> ALT address
+
+    // Reverse index: account_address -> which ALT contains it
+    account_to_alt: HashMap<Pubkey, (Pubkey, u8)>,   // (alt_address, index_in_alt)
+}
+
+impl AltSelector {
+    fn select_alts(&self, route: &Route, all_accounts: &[Pubkey]) -> AltSelection {
+        // 1. Always include Tier 0
+        let mut selected = vec![self.global_alt];
+        let mut resolved = HashSet::new();
+
+        // Mark accounts resolved by Tier 0
+        for acc in all_accounts {
+            if let Some((alt, _)) = self.account_to_alt.get(acc) {
+                if *alt == self.global_alt {
+                    resolved.insert(*acc);
+                }
+            }
+        }
+
+        // 2. Score each candidate ALT by how many unresolved accounts it covers
+        let mut candidates: Vec<(Pubkey, usize)> = Vec::new();
+
+        // Check Tier 2 (token ALTs) for intermediate tokens in route
+        for hop in &route.hops {
+            let pool = &self.pool_cache[hop.pool_index];
+            let non_base_mint = if pool.mint_a == WSOL { pool.mint_b } else { pool.mint_a };
+            if let Some(&alt) = self.token_alts.get(&non_base_mint) {
+                let coverage = self.count_coverage(alt, all_accounts, &resolved);
+                candidates.push((alt, coverage));
+            }
+        }
+
+        // Check Tier 1 (DEX ALTs) for each DEX in route
+        for hop in &route.hops {
+            let pool = &self.pool_cache[hop.pool_index];
+            if let Some(&alt) = self.dex_alts.get(&pool.dex_type) {
+                let coverage = self.count_coverage(alt, all_accounts, &resolved);
+                candidates.push((alt, coverage));
+            }
+        }
+
+        // 3. Greedy selection: pick ALT with highest coverage, repeat (max 2 more)
+        candidates.sort_by(|a, b| b.1.cmp(&a.1));
+        candidates.dedup_by_key(|c| c.0);
+
+        for (alt, _) in candidates.iter().take(2) {
+            selected.push(*alt);
+            // Mark newly resolved accounts
+            for acc in all_accounts {
+                if let Some((a, _)) = self.account_to_alt.get(acc) {
+                    if *a == *alt { resolved.insert(*acc); }
+                }
+            }
+        }
+
+        // 4. Check if remaining unresolved accounts fit as raw addresses
+        let unresolved: Vec<Pubkey> = all_accounts.iter()
+            .filter(|a| !resolved.contains(a))
+            .cloned().collect();
+
+        let raw_bytes = unresolved.len() * 32;
+        let alt_ref_bytes = selected.len() * 32;
+        let resolved_bytes = (all_accounts.len() - unresolved.len()) * 1;
+        let estimated_tx_size = raw_bytes + alt_ref_bytes + resolved_bytes + TX_OVERHEAD;
+
+        if estimated_tx_size > MAX_TX_SIZE {
+            // Need Tier 3 ephemeral ALT
+            return AltSelection::NeedsEphemeral {
+                alts: selected,
+                missing_accounts: unresolved
+            };
+        }
+
+        AltSelection::Ready {
+            alts: selected,
+            raw_accounts: unresolved
+        }
+    }
+}
+```
+
+### 9.5 ALT Lifecycle Management
+
+```rust
+// client/src/alt/manager.rs
+
+struct AltManager {
+    authority: Arc<Keypair>,
+    rpc: RpcClient,
+}
+
+impl AltManager {
+    /// Startup: create or load existing ALTs
+    async fn initialize(&self, pool_cache: &PoolStateCache) -> Result<AltSelector> {
+        // 1. Create/load Tier 0 (Global Static)
+        let global = self.ensure_global_alt().await?;
+
+        // 2. Create/load Tier 1 (Per-DEX)
+        let mut dex_alts = HashMap::new();
+        for dex_type in DexType::all() {
+            let pools = pool_cache.pools_by_dex(dex_type);
+            if pools.len() > 0 {
+                let alt = self.ensure_dex_alt(dex_type, &pools).await?;
+                dex_alts.insert(dex_type, alt);
+            }
+        }
+
+        // 3. Create/load Tier 2 (Hot Tokens)
+        //    Select top-N tokens by: route_count × avg_liquidity
+        let hot_tokens = pool_cache.top_tokens_by_activity(HOT_TOKEN_COUNT);
+        let mut token_alts = HashMap::new();
+        for mint in hot_tokens {
+            let pools = pool_cache.pools_by_mint(&mint);
+            let alt = self.ensure_token_alt(&mint, &pools).await?;
+            token_alts.insert(mint, alt);
+        }
+
+        Ok(AltSelector::new(global, dex_alts, token_alts))
+    }
+
+    /// Runtime: extend ALT when new pool discovered
+    async fn on_new_pool(&self, pool: &PoolState, selector: &mut AltSelector) {
+        // Add pool accounts to the appropriate Tier 1 (DEX) ALT
+        if let Some(&alt) = selector.dex_alts.get(&pool.dex_type) {
+            let new_accounts: Vec<Pubkey> = pool.accounts.iter()
+                .filter(|a| !selector.account_to_alt.contains_key(a))
+                .cloned().collect();
+
+            if !new_accounts.is_empty() {
+                self.extend_alt(alt, &new_accounts).await.ok();
+                // Update reverse index
+                for (i, acc) in new_accounts.iter().enumerate() {
+                    selector.account_to_alt.insert(*acc, (alt, (existing_len + i) as u8));
+                }
+            }
+        }
+    }
+
+    /// Periodic: promote frequently-used tokens to Tier 2
+    async fn promote_hot_tokens(&self, metrics: &Metrics, selector: &mut AltSelector) {
+        // Every N minutes, check if any token's opportunity frequency
+        // exceeds threshold and doesn't have a Tier 2 ALT yet
+        let candidates = metrics.top_opportunity_tokens(20);
+        for mint in candidates {
+            if !selector.token_alts.contains_key(&mint) {
+                let pools = self.pool_cache.pools_by_mint(&mint);
+                let alt = self.create_token_alt(&mint, &pools).await?;
+                selector.token_alts.insert(mint, alt);
+            }
+        }
+    }
+
+    /// Periodic: deactivate + close unused Tier 3 ephemeral ALTs
+    async fn cleanup_ephemeral_alts(&self, selector: &mut AltSelector) {
+        // ALTs need deactivation cooldown (~512 slots ≈ 3.5 min) before closing
+        // Close reclaims rent (~0.002 SOL per ALT)
+        for (sig, alt) in selector.ephemeral_alts.iter() {
+            if alt.last_used.elapsed() > Duration::from_secs(300) {
+                self.deactivate_and_close(alt.address).await.ok();
+            }
+        }
+    }
+}
+```
+
+### 9.6 ALT Cost Analysis
+
+```
+Creation cost:
+  - Create ALT:      ~0.003 SOL (rent-exempt minimum)
+  - Extend (per 30 addresses): ~0.001 SOL (rent increase)
+
+Steady-state ALTs:
+  Tier 0: 1 table                  = 0.003 SOL
+  Tier 1: ~15 active DEX tables    = 0.045 SOL
+  Tier 2: ~50 hot token tables     = 0.150 SOL
+  Tier 3: ~10 ephemeral (rotating) = 0.030 SOL (reclaimed on close)
+  ─────────────────────────────────────────────
+  Total rent locked:               ≈ 0.23 SOL
+
+Runtime cost:
+  - ALT extend transaction: ~5000 lamports (negligible)
+  - Tier 3 create+close cycle: ~0.003 SOL (fully reclaimed)
+  - Net ongoing cost: essentially zero
+```
+
+### 9.7 Constraints & Edge Cases
+
+**Signer accounts cannot be in ALT.** The payer (index 0) must always be a raw 32-byte address in the transaction. This is 1 account = 32 bytes overhead per transaction, unavoidable.
+
+**ALT must be active for ≥1 slot before use.** Newly created or extended ALTs require waiting for the extension transaction to confirm. For Tier 1/2 this is a one-time cost. For Tier 3 ephemeral ALTs, this adds ~400ms latency (1 slot).
+
+**Max 256 entries per ALT.** If a DEX has >256 unique pool accounts, it needs multiple Tier 1 ALTs. In practice, we only store the top-256 most liquid pools per DEX.
+
+**ALT deactivation cooldown: ~512 slots (~3.5 min).** Tier 3 ephemeral ALTs cannot be closed immediately. The manager tracks deactivation state and closes after cooldown.
+
+**Transaction can reference up to ~4 ALTs** (practical limit). The Tier 0 always occupies 1 slot, leaving 3 for Tier 1/2/3 selection. The greedy selection algorithm optimizes coverage within this constraint.
+
+---
+
+## 10. Configuration
 
 ```toml
 # config.toml
@@ -720,6 +1079,13 @@ min_pool_reserve_lamports = 100_000_000   # 0.1 SOL
 max_single_hop_fee_bps = 200              # 2%
 max_routes_per_mint = 500
 top_n_mints_for_4hop = 200
+
+[alt]
+global_alt_address = ""              # Empty = create on first run, then persist
+hot_token_count = 50                 # Number of Tier 2 hot token ALTs
+hot_token_refresh_interval_sec = 300 # Re-evaluate hot tokens every 5 min
+ephemeral_cleanup_interval_sec = 300 # Clean up unused Tier 3 ALTs every 5 min
+max_alts_per_tx = 3                  # Max ALTs referenced per transaction (1 reserved for Tier 0)
 
 [pools]
 addresses = [
