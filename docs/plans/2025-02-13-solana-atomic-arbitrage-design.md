@@ -748,11 +748,16 @@ A single transaction can reference **up to 4 ALTs** (practical limit by tx size)
 │ - Updated when new pools discovered                 │
 │ ≈ 200-256 entries each                              │
 ├─────────────────────────────────────────────────────┤
-│ Tier 2: Hot Token ALTs (dynamic, rotated)            │
-│ - Per-token tables for high-frequency tokens        │
+│ Tier 2: Hot Token ALTs (on-demand, few)              │
+│ - Created ONLY when ALL conditions met:              │
+│   1. Token has ≥3 profitable 4-hop opportunities     │
+│      in the past N minutes                           │
+│   2. Those opportunities were degraded/dropped       │
+│      due to insufficient ALT coverage                │
+│   3. Token has active pools across ≥3 DEXes          │
 │ - Contains all pool accounts across DEXes for       │
-│   that token's routes                               │
-│ - User's ATA for that token                         │
+│   that token's routes + user ATA                    │
+│ - Expected count: ~5-10 (USDC, USDT, major tokens) │
 │ ≈ 100-256 entries each                              │
 ├─────────────────────────────────────────────────────┤
 │ Tier 3: Ephemeral ALTs (short-lived, opportunity)    │
@@ -783,17 +788,26 @@ Remaining (signer, user ATAs): ~3 × 32 = 96 bytes (signers can't be in ALT)
 Total: 96 + 28 + 96 + ix_data ≈ 250 bytes ✅
 ```
 
-#### Scenario B: 3-hop, high-frequency token
+#### Scenario B: 3-hop, high-frequency token (Tier 2 exists)
 
 ```
 Route: WSOL →[pool_X]→ USDC →[pool_Y]→ TOKEN_B →[pool_Z]→ WSOL
 
+USDC has been promoted to Tier 2 (meets all 3 criteria: frequent 4-hop opps,
+ALT drops observed, pools across ≥3 DEXes).
+
 ALTs used:
   1. Tier 0 (Global Static)     → program IDs, common addresses
-  2. Tier 2 (USDC Hot Token)    → all USDC-related pool accounts, USDC mint, user USDC ATA
+  2. Tier 2 (USDC)              → all USDC-related pool accounts, USDC mint, user USDC ATA
   3. Tier 1 (DEX for pool_Z)    → pool_Z specific accounts
 
 Total: ~3 ALTs, all accounts resolved via index ✅
+
+If USDC does NOT have a Tier 2 ALT yet:
+  → Use Tier 0 + Tier 1 (DEX for pool_X) + Tier 1 (DEX for pool_Z)
+  → pool_Y accounts go as raw addresses if space permits
+  → If this route gets dropped due to tx size, it counts toward
+    USDC's promotion metric (condition 2)
 ```
 
 #### Scenario C: 4-hop, mixed DEXes
@@ -960,15 +974,10 @@ impl AltManager {
             }
         }
 
-        // 3. Create/load Tier 2 (Hot Tokens)
-        //    Select top-N tokens by: route_count × avg_liquidity
-        let hot_tokens = pool_cache.top_tokens_by_activity(HOT_TOKEN_COUNT);
-        let mut token_alts = HashMap::new();
-        for mint in hot_tokens {
-            let pools = pool_cache.pools_by_mint(&mint);
-            let alt = self.ensure_token_alt(&mint, &pools).await?;
-            token_alts.insert(mint, alt);
-        }
+        // 3. Load existing Tier 2 (Hot Tokens) from persisted state
+        //    Do NOT pre-create at startup. Tier 2 is built on-demand at runtime
+        //    when the promotion criteria are met (see promote_hot_tokens).
+        let token_alts = self.load_persisted_token_alts().await?;
 
         Ok(AltSelector::new(global, dex_alts, token_alts))
     }
@@ -991,16 +1000,54 @@ impl AltManager {
         }
     }
 
-    /// Periodic: promote frequently-used tokens to Tier 2
-    async fn promote_hot_tokens(&self, metrics: &Metrics, selector: &mut AltSelector) {
-        // Every N minutes, check if any token's opportunity frequency
-        // exceeds threshold and doesn't have a Tier 2 ALT yet
-        let candidates = metrics.top_opportunity_tokens(20);
-        for mint in candidates {
-            if !selector.token_alts.contains_key(&mint) {
-                let pools = self.pool_cache.pools_by_mint(&mint);
-                let alt = self.create_token_alt(&mint, &pools).await?;
-                selector.token_alts.insert(mint, alt);
+    /// Runtime: promote token to Tier 2 when criteria met
+    async fn maybe_promote_to_tier2(
+        &self,
+        mint: &Pubkey,
+        metrics: &Metrics,
+        selector: &mut AltSelector,
+    ) {
+        // Skip if already has Tier 2 ALT
+        if selector.token_alts.contains_key(mint) { return; }
+
+        // All 3 conditions must be met:
+        // 1. ≥3 profitable 4-hop opportunities in past 5 minutes
+        let opp_count = metrics.profitable_4hop_count(mint, Duration::from_secs(300));
+        if opp_count < 3 { return; }
+
+        // 2. At least 1 opportunity was dropped/degraded due to ALT shortage
+        let dropped = metrics.alt_dropped_count(mint, Duration::from_secs(300));
+        if dropped < 1 { return; }
+
+        // 3. Token has active pools across ≥3 distinct DEXes
+        let dex_count = self.pool_cache.distinct_dex_count(mint);
+        if dex_count < 3 { return; }
+
+        // All conditions met → create Tier 2 ALT
+        let pools = self.pool_cache.pools_by_mint(mint);
+        if let Ok(alt) = self.create_token_alt(mint, &pools).await {
+            selector.token_alts.insert(*mint, alt);
+            self.persist_token_alt(mint, &alt).await.ok();
+            tracing::info!(%mint, dex_count, opp_count, "Promoted token to Tier 2 ALT");
+        }
+    }
+
+    /// Periodic: demote Tier 2 ALTs that are no longer justified
+    async fn demote_stale_tier2(&self, metrics: &Metrics, selector: &mut AltSelector) {
+        // If a Tier 2 ALT hasn't been used in any landed bundle for 30 min,
+        // deactivate + close to reclaim rent
+        let stale: Vec<Pubkey> = selector.token_alts.iter()
+            .filter(|(mint, _)| {
+                metrics.last_tier2_use(mint).elapsed() > Duration::from_secs(1800)
+            })
+            .map(|(mint, _)| *mint)
+            .collect();
+
+        for mint in stale {
+            if let Some(alt) = selector.token_alts.remove(&mint) {
+                self.deactivate_and_close(alt).await.ok();
+                self.remove_persisted_token_alt(&mint).await.ok();
+                tracing::info!(%mint, "Demoted stale Tier 2 ALT");
             }
         }
     }
@@ -1026,12 +1073,12 @@ Creation cost:
   - Extend (per 30 addresses): ~0.001 SOL (rent increase)
 
 Steady-state ALTs:
-  Tier 0: 1 table                  = 0.003 SOL
-  Tier 1: ~15 active DEX tables    = 0.045 SOL
-  Tier 2: ~50 hot token tables     = 0.150 SOL
-  Tier 3: ~10 ephemeral (rotating) = 0.030 SOL (reclaimed on close)
+  Tier 0: 1 table                   = 0.003 SOL
+  Tier 1: ~15 active DEX tables     = 0.045 SOL
+  Tier 2: ~5-10 on-demand tables    = 0.045-0.090 SOL
+  Tier 3: ~5 ephemeral (rotating)   = 0.015 SOL (reclaimed on close)
   ─────────────────────────────────────────────
-  Total rent locked:               ≈ 0.23 SOL
+  Total rent locked:                ≈ 0.11-0.15 SOL
 
 Runtime cost:
   - ALT extend transaction: ~5000 lamports (negligible)
@@ -1082,8 +1129,12 @@ top_n_mints_for_4hop = 200
 
 [alt]
 global_alt_address = ""              # Empty = create on first run, then persist
-hot_token_count = 50                 # Number of Tier 2 hot token ALTs
-hot_token_refresh_interval_sec = 300 # Re-evaluate hot tokens every 5 min
+# Tier 2 promotion criteria (ALL must be met)
+tier2_min_profitable_4hop_opps = 3   # ≥3 profitable 4-hop opps in window
+tier2_min_alt_drops = 1              # ≥1 opportunity dropped due to ALT shortage
+tier2_min_distinct_dexes = 3         # Token must have pools across ≥3 DEXes
+tier2_eval_window_sec = 300          # Evaluation window (5 min)
+tier2_demote_after_sec = 1800        # Demote if unused for 30 min
 ephemeral_cleanup_interval_sec = 300 # Clean up unused Tier 3 ALTs every 5 min
 max_alts_per_tx = 3                  # Max ALTs referenced per transaction (1 reserved for Tier 0)
 
