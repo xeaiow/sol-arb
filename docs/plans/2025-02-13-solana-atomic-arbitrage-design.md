@@ -14,6 +14,11 @@
 | Profit Calculation | Fully off-chain; on-chain is pure execution + verification |
 | Simulation | Skipped in production (Jito bundle failure = no cost) |
 | Address Lookup Table | Multi-tier ALT strategy (static + per-DEX + dynamic hot pool) |
+| Token-2022 | Full support: per-mint program detection, conditional Memo injection, correct ATA derivation |
+| ATA Management | Base ATAs eager at startup; route token ATAs lazy-created on-chain |
+| Base Mint | Multi-base: SOL + USDC + USD1 with bridge pool for mixed-mode routes |
+| Anti-Fingerprinting | CU jitter, fee collector rotation, tip account rotation |
+| Flashloan | Zero-capital execution via on-chain flashloan vaults |
 
 ## Reference Projects
 
@@ -89,7 +94,9 @@ onchain-arb/
 │       ├── params.rs               # Instruction data parsing (zero-copy)
 │       ├── accounts.rs             # Header/pool account splitting
 │       ├── constants.rs            # pool_type -> account_count lookup
-│       └── error.rs                # Minimal error enum (4 variants)
+│       ├── token.rs               # Token-2022 aware transfer + balance read
+│       ├── ata.rs                 # Lazy ATA creation (create_idempotent CPI)
+│       └── error.rs                # Minimal error enum
 │
 ├── client/                         # Off-chain engine
 │   ├── Cargo.toml
@@ -101,7 +108,8 @@ onchain-arb/
 │       │   ├── mod.rs
 │       │   ├── geyser.rs           # gRPC Geyser account subscriptions
 │       │   ├── pool_parser.rs      # Auto-detect DEX type, parse pool state
-│       │   └── pool_state.rs       # Unified pool state structures
+│       │   ├── pool_state.rs       # Unified pool state structures
+│       │   └── token_program.rs    # Token-2022 detection, memo injection logic
 │       │
 │       ├── routing/                # Route layer
 │       │   ├── mod.rs
@@ -138,7 +146,9 @@ onchain-arb/
 │       │
 │       └── utils/
 │           ├── mod.rs
-│           ├── ata.rs              # ATA address derivation
+│           ├── ata.rs              # ATA management (eager base + lazy route)
+│           ├── blockhash.rs        # Background blockhash cache (10s refresh)
+│           ├── fingerprint.rs      # Anti-fingerprinting: CU jitter, collector rotation
 │           └── metrics.rs          # Latency, profit, success rate stats
 │
 └── docs/
@@ -388,6 +398,10 @@ struct PoolState {
     dex_type: u8,                       // 0-34
     mint_a: Pubkey,
     mint_b: Pubkey,
+    base_mint: Pubkey,                  // SOL, USDC, or USD1
+    token_program_a: Pubkey,            // SPL Token or Token-2022 for mint_a
+    token_program_b: Pubkey,            // SPL Token or Token-2022 for mint_b
+    needs_memo: bool,                   // Token-2022 + CLMM = needs Memo Program
     math: PoolMath,
     account_count: usize,               // Number of accounts needed for on-chain CPI
     accounts: Vec<Pubkey>,              // Pre-stored pool-related account addresses
@@ -406,6 +420,7 @@ struct Route {
 struct Hop {
     pool_index: u32,                     // Index into PoolStateCache
     is_a_to_b: bool,                     // Swap direction
+    is_token_2022: bool,                 // Intermediate token uses Token-2022
 }
 ```
 
@@ -1100,13 +1115,703 @@ Runtime cost:
 
 ---
 
-## 10. Configuration
+## 10. Token-2022 Support
+
+Token-2022 (SPL Token 2022) is increasingly prevalent on Solana. Many new tokens use it for transfer fees, interest-bearing mechanics, and other extensions. Not supporting it means missing a significant portion of arbitrage opportunities.
+
+### 10.1 Detection (Off-Chain)
+
+```rust
+// feed/token_program.rs
+
+const TOKEN_2022_PROGRAM_ID: Pubkey = /* TokenzQdBNbLqP5VEhdkAS6EPFLC1PHnBqCXEpPxuEb */;
+
+struct MintInfo {
+    address: Pubkey,
+    token_program: Pubkey,          // spl_token::ID or TOKEN_2022_PROGRAM_ID
+    needs_memo: bool,               // true if Token-2022 + CLMM pool
+}
+
+fn detect_token_program(mint_account: &Account) -> Pubkey {
+    if mint_account.owner == spl_token::ID {
+        spl_token::ID
+    } else if mint_account.owner == TOKEN_2022_PROGRAM_ID {
+        TOKEN_2022_PROGRAM_ID
+    } else {
+        panic!("Unknown token program for mint");
+    }
+}
+```
+
+This is detected once per mint during pool initialization by checking the mint account's `owner` field on-chain.
+
+### 10.2 Memo Program Injection
+
+CLMM-style pools (DLMM, Whirlpool, Raydium CLMM, PancakeSwap, Byreal, Stabble CLMM) require the **Memo Program** as an additional account when the token uses Token-2022. AMM-style pools do NOT need it.
+
+```rust
+// Conditional memo injection during account assembly
+fn needs_memo_program(dex_type: u8, token_program: &Pubkey) -> bool {
+    if *token_program == spl_token::ID {
+        return false; // Standard SPL Token never needs memo
+    }
+    // Token-2022: only CLMM-style pools need memo
+    matches!(dex_type,
+        DEX_METEORA_DLMM | DEX_WHIRLPOOL | DEX_RAYDIUM_CLMM |
+        DEX_PANCAKESWAP | DEX_BYREAL | DEX_STABBLE_CLMM
+    )
+}
+```
+
+**Impact on account layout**: When memo is needed, it is already in the header (index 5). The on-chain program reads a flag from instruction data to know whether to include it in the CPI call.
+
+### 10.3 ATA Derivation
+
+Token-2022 ATAs live at **different addresses** than SPL Token ATAs for the same mint:
+
+```rust
+// WRONG: always uses SPL Token program
+let ata = get_associated_token_address(&wallet, &mint);
+
+// CORRECT: uses the actual token program for this mint
+let ata = get_associated_token_address_with_program_id(&wallet, &mint, &token_program);
+```
+
+This propagates everywhere: pool state caching, route table, transaction building, ALT entries.
+
+### 10.4 On-Chain Token-2022 Handling
+
+```rust
+// program/src/token.rs
+
+/// Read token balance - works for both SPL Token and Token-2022
+/// Both store amount at byte offset 64 in the account data
+#[inline(always)]
+pub unsafe fn read_balance(account: &AccountInfo) -> u64 {
+    // Same layout for both programs: offset 64 = amount field
+    core::ptr::read_unaligned(account.data_ptr().add(64) as *const u64)
+}
+
+/// Determine which token program to use for CPI
+/// The token program account is passed in the header
+#[inline(always)]
+fn select_token_program(header: &[AccountInfo], flags: u8) -> &AccountInfo {
+    if flags & FLAG_TOKEN_2022 != 0 {
+        &header[4]  // Token-2022 Program
+    } else {
+        &header[3]  // SPL Token Program
+    }
+}
+```
+
+**CU impact**: Zero additional CU. The balance layout is identical for both programs. The only difference is which program ID is passed to the CPI call.
+
+### 10.5 Instruction Data Flag Extension
+
+Add a Token-2022 flag per hop in the existing flags byte:
+
+```
+Byte 3 (2-hop flags):
+  bit 0: is_buy_token_a
+  bit 1: is_sell_token_a
+  bit 2: buy_token_is_2022        ← NEW
+  bit 3: sell_token_is_2022       ← NEW
+  bit 7: is_simulate
+```
+
+This tells the on-chain program which token program to use for each hop's CPI, with no runtime detection overhead.
+
+---
+
+## 11. ATA Management
+
+### 11.1 Two-Tier Strategy
+
+```
+Tier 1: Base Token ATAs — Eager (startup)
+  - WSOL, USDC, USD1
+  - Created at bot startup via create_associated_token_account_idempotent
+  - These are always needed, so pre-create unconditionally
+
+Tier 2: Route Token ATAs — Lazy (on-chain)
+  - All intermediate tokens in swap routes
+  - Created by the on-chain program during first execution
+  - Uses create_associated_token_account_idempotent CPI
+```
+
+### 11.2 Why Lazy ATA Creation
+
+```
+Problem with eager creation:
+  - 5,000 active tokens × 1 ATA each = 5,000 creation transactions at startup
+  - Each costs ~0.002 SOL rent = 10 SOL total locked
+  - Most tokens may never be traded
+  - New tokens discovered at runtime need immediate ATA creation
+
+Lazy creation solves all of these:
+  - Only create ATA when actually executing a swap
+  - On-chain create_idempotent is safe (no-op if exists)
+  - Cost: ~20,000 extra CU on FIRST trade of each token only
+  - Subsequent trades: 0 extra CU (ATA already exists)
+```
+
+### 11.3 On-Chain Lazy ATA
+
+```rust
+// program/src/ata.rs
+
+use pinocchio::instruction::{AccountMeta, Instruction};
+
+/// Create ATA if it doesn't exist. No-op if it already exists.
+/// Uses the Associated Token Program's create_idempotent instruction.
+#[inline(always)]
+pub fn ensure_ata(
+    payer: &AccountInfo,
+    wallet: &AccountInfo,
+    mint: &AccountInfo,
+    ata: &AccountInfo,
+    token_program: &AccountInfo,
+    system_program: &AccountInfo,
+) -> ProgramResult {
+    // If account has data, ATA already exists → skip
+    if ata.data_len() > 0 {
+        return Ok(());
+    }
+
+    // CPI to Associated Token Program: create_idempotent
+    let ix = Instruction {
+        program_id: &ASSOCIATED_TOKEN_PROGRAM_ID,
+        accounts: &[
+            AccountMeta::writable_signer(payer.key()),
+            AccountMeta::writable(ata.key()),
+            AccountMeta::readonly(wallet.key()),
+            AccountMeta::readonly(mint.key()),
+            AccountMeta::readonly(system_program.key()),
+            AccountMeta::readonly(token_program.key()),
+        ],
+        data: &[1], // 1 = create_idempotent instruction
+    };
+    invoke::<6>(&ix, &[payer, ata, wallet, mint, system_program, token_program])
+}
+```
+
+### 11.4 Account Layout Impact
+
+The header already includes per-hop token accounts. The Associated Token Program + System Program must be in the header for lazy creation:
+
+```
+Updated Header:
+  [0] Payer (signer)
+  [1] Base mint (WSOL)
+  [2] User base token account
+  [3] SPL Token Program
+  [4] Token-2022 Program
+  [5] Memo Program
+  [6] Associated Token Program        ← needed for lazy ATA
+  [7] System Program                  ← needed for lazy ATA
+  [8..8+N] Per intermediate token: (mint, token_program_for_mint, ata)
+```
+
+**Header sizes (updated):**
+- 2-hop: 11 accounts (8 base + 3 for intermediate token)
+- 3-hop: 14 accounts (8 base + 3 × 2 intermediate tokens)
+- 4-hop: 17 accounts (8 base + 3 × 3 intermediate tokens)
+
+---
+
+## 12. Mixed-Mode Base Mint (SOL/USDC/USD1 Bridge)
+
+### 12.1 Problem
+
+Not all pools use SOL (WSOL) as the base token. Many pools pair against USDC or USD1. If a token has pools on both SOL-based and USDC-based DEXes, ignoring this means missing cross-base arbitrage opportunities.
+
+```
+Example: TOKEN_X
+  Pool A (Pump.fun):    TOKEN_X / SOL
+  Pool B (some DEX):    TOKEN_X / USDC
+
+Without bridge: these two pools cannot form an arbitrage route
+With bridge:    SOL →[Pool A]→ TOKEN_X →[Pool B]→ USDC →[Bridge]→ SOL ✅
+```
+
+### 12.2 Bridge Pool Design
+
+A **bridge pool** is a high-liquidity SOL/USDC (or SOL/USD1) pool used to convert between base mints within a single atomic transaction.
+
+```rust
+// Hardcoded bridge pools (Raydium V4, highest liquidity SOL/stable pairs)
+const SOL_USDC_BRIDGE: BridgePool = BridgePool {
+    pool: pubkey!("58oQChx4yWmvKdwLLZzBi4ChoCc2fqCUWBkwMihLYQo2"),
+    program: RAYDIUM_AMM_V4,
+    usdc_vault: pubkey!("..."),
+    sol_vault: pubkey!("..."),
+};
+
+const SOL_USD1_BRIDGE: BridgePool = BridgePool {
+    pool: pubkey!("FaDoeere161VKUFqcrQGEM8it6kSCHKrLyq7wWyPvBkPq"),
+    program: RAYDIUM_AMM_V4,
+    usd1_vault: pubkey!("..."),
+    sol_vault: pubkey!("..."),
+};
+```
+
+### 12.3 Off-Chain: Route Graph Extension
+
+The route graph must model base mint as part of the edge:
+
+```rust
+struct PoolEdge {
+    pool_index: u32,
+    mint_a: Pubkey,
+    mint_b: Pubkey,
+    base_mint: Pubkey,      // SOL, USDC, or USD1
+    dex_type: u8,
+}
+```
+
+When building routes, the graph allows transitions through bridge pools:
+
+```
+WSOL → [SOL-base pool] → TOKEN → [USDC-base pool] → USDC → [Bridge] → WSOL
+```
+
+The bridge hop is treated as a regular hop in the route (counts toward 4-hop limit).
+
+### 12.4 Off-Chain: Detection
+
+During pool initialization, detect the base mint for each pool:
+
+```rust
+fn detect_base_mint(pool: &PoolState) -> Pubkey {
+    let sol = WSOL_MINT;
+    let usdc = USDC_MINT;
+    let usd1 = USD1_MINT;
+
+    if pool.mint_a == sol || pool.mint_b == sol { sol }
+    else if pool.mint_a == usdc || pool.mint_b == usdc { usdc }
+    else if pool.mint_a == usd1 || pool.mint_b == usd1 { usd1 }
+    else { Pubkey::default() } // No recognized base → skip pool
+}
+```
+
+### 12.5 On-Chain: Bridge Execution
+
+The bridge swap is just another CPI hop. No special on-chain logic needed — the off-chain engine treats the bridge as hop N in the route, and the on-chain program executes it like any other swap.
+
+### 12.6 Account Layout for Mixed-Mode
+
+When a route uses mixed base mints, additional accounts are needed:
+
+```
+Extended Header (mixed-mode):
+  [...base header...]
+  [+0] USDC mint (or USD1 mint)
+  [+1] User USDC token account (or USD1)
+  [+2] Bridge pool program ID
+  [+3] Bridge pool authority
+  [+4] Bridge pool state
+  [+5] Bridge vault A
+  [+6] Bridge vault B
+```
+
+These bridge accounts go into the Tier 0 ALT (they are static, known addresses).
+
+### 12.7 Profit Calculation Adjustment
+
+Mixed-mode routes need an extra step in profit calculation:
+
+```
+Standard route: profit = final_WSOL - initial_WSOL
+Mixed route:    profit = final_WSOL - initial_WSOL
+                (bridge conversion is already part of the hop chain,
+                 so final balance is always in WSOL regardless of path)
+```
+
+No change needed in the on-chain profit check — it always compares WSOL balances.
+
+---
+
+## 13. Anti-Fingerprinting
+
+MEV bots are high-value targets for detection by validators, competing bots, and sandwich attackers. Multiple fingerprinting countermeasures reduce the bot's on-chain signature.
+
+### 13.1 CU Limit Jitter
+
+```rust
+// executor/tx_builder.rs
+
+fn compute_budget_ix(base_cu: u32) -> Instruction {
+    // Add random 0-999 to make each tx's CU limit unique
+    let jittered_cu = base_cu + (rand::random::<u32>() % 1000);
+    ComputeBudgetInstruction::set_compute_unit_limit(jittered_cu)
+}
+```
+
+Without jitter, every 2-hop transaction has identical CU limit = trivially fingerprintable.
+
+### 13.2 Fee Collector Rotation
+
+```rust
+// executor/tx_builder.rs
+
+const FEE_COLLECTORS_SOL: [Pubkey; 3] = [/* 3 different addresses */];
+const FEE_COLLECTOR_USDC: Pubkey = /* dedicated USDC collector */;
+
+fn select_fee_collector(base_mint: &Pubkey) -> Pubkey {
+    if *base_mint == USDC_MINT {
+        FEE_COLLECTOR_USDC
+    } else {
+        FEE_COLLECTORS_SOL[rand::random::<usize>() % FEE_COLLECTORS_SOL.len()]
+    }
+}
+```
+
+Rotating fee collectors prevents pattern matching on the fee destination. Multiple collector wallets aggregate profits that can be consolidated off-chain.
+
+### 13.3 Jito Tip Account Rotation
+
+Already in the design (8 tip accounts, randomly selected). This is standard Jito practice.
+
+### 13.4 Flashloan Vault Rotation
+
+```rust
+const FLASHLOAN_VAULT_AUTHORITIES: [Pubkey; 2] = [/* 2 vault authorities */];
+
+fn select_vault(base_mint: &Pubkey) -> (Pubkey, usize) {
+    if *base_mint == USDC_MINT {
+        (FLASHLOAN_VAULT_AUTHORITIES[0], 0) // USDC always vault 0
+    } else {
+        let idx = rand::random::<usize>() % 2;
+        (FLASHLOAN_VAULT_AUTHORITIES[idx], idx)
+    }
+}
+```
+
+Two SOL flashloan vaults randomly selected. Different vaults produce different transaction signatures.
+
+### 13.5 Combined Effect
+
+```
+Without anti-fingerprinting:
+  CU limit:      always 200,000        → 1 pattern
+  Fee collector:  always 0xABC...       → 1 pattern
+  Tip account:    always 0xDEF...       → 1 pattern
+  Vault:          always 0x123...       → 1 pattern
+  Combined signatures: 1 × 1 × 1 × 1 = 1 unique pattern (trivially detectable)
+
+With anti-fingerprinting:
+  CU limit:      200,000-200,999       → 1,000 variants
+  Fee collector:  3 rotation            → 3 variants
+  Tip account:    8 rotation            → 8 variants
+  Vault:          2 rotation            → 2 variants
+  Combined signatures: 1000 × 3 × 8 × 2 = 48,000 unique patterns
+```
+
+---
+
+## 14. Flashloan Integration
+
+Flashloan enables **zero-capital arbitrage**: borrow the input amount, execute the arb, repay the loan + fee, keep the profit. If the arb fails, the entire transaction reverts including the loan — zero cost.
+
+### 14.1 Architecture
+
+```
+┌─────────────────────────────────────────────────────┐
+│ Single Atomic Transaction                            │
+│                                                      │
+│  1. Borrow X SOL from flashloan vault               │
+│  2. Execute arbitrage (2/3/4-hop swaps)              │
+│  3. Repay X SOL + protocol fee to vault              │
+│  4. Verify: remaining profit ≥ min_profit            │
+│                                                      │
+│  If ANY step fails → entire TX reverts → zero cost   │
+└─────────────────────────────────────────────────────┘
+```
+
+### 14.2 Instruction Data Extension
+
+```
+Existing flags byte, add flashloan bit:
+
+Byte 3 (flags):
+  bit 0: is_buy_token_a
+  bit 1: is_sell_token_a
+  bit 2: buy_token_is_2022
+  bit 3: sell_token_is_2022
+  bit 4: use_flashloan               ← NEW
+  bit 7: is_simulate
+```
+
+### 14.3 Account Layout Extension
+
+When flashloan is enabled, 2 extra accounts are added to the header:
+
+```
+Flashloan Header Extension:
+  [+0] Vault authority (PDA)
+  [+1] Vault token account (PDA-derived or ATA, depends on vault index)
+```
+
+These go into the Tier 0 ALT since they are static addresses.
+
+### 14.4 Vault Token Account Derivation
+
+Two vault patterns (matching the reference implementation):
+
+```rust
+fn derive_vault_token_account(vault_index: usize, base_mint: &Pubkey) -> Pubkey {
+    if vault_index == 0 {
+        // Vault 0: PDA-derived
+        let (pda, _) = Pubkey::find_program_address(
+            &[b"vault_token_account", base_mint.as_ref()],
+            &EXECUTOR_PROGRAM_ID,
+        );
+        pda
+    } else {
+        // Vault 1: standard ATA
+        get_associated_token_address(&FLASHLOAN_VAULT_AUTHORITIES[1], base_mint)
+    }
+}
+```
+
+### 14.5 On-Chain Flashloan Flow
+
+```rust
+#[inline(always)]
+fn execute_2hop_flashloan(accounts: &[AccountInfo], data: &[u8]) -> ProgramResult {
+    let params = parse_2hop_params(data);
+
+    let (header, pools) = accounts.split_at(HEADER_2HOP_FLASHLOAN);
+    let vault_authority = &header[VAULT_AUTHORITY_IDX];
+    let vault_token = &header[VAULT_TOKEN_IDX];
+
+    // 1. Record vault balance before borrow
+    let vault_before = unsafe { read_balance(vault_token) };
+
+    // 2. Transfer from vault to user (CPI to token program)
+    transfer_from_vault(vault_authority, vault_token, &header[2], params.amount_in)?;
+
+    // 3. Execute arb (same as non-flashloan)
+    let initial = unsafe { read_balance(header[2]) };
+    dispatch_swap(params.buy_dex, header, buy_accs, params.amount_in, params.buy_flags)?;
+    let mid = unsafe { read_balance(header[TOKEN_ATA_IDX]) };
+    dispatch_swap(params.sell_dex, header, sell_accs, mid, params.sell_flags)?;
+    let final_bal = unsafe { read_balance(header[2]) };
+
+    // 4. Repay: transfer amount_in back to vault
+    transfer_to_vault(&header[0], &header[2], vault_token, params.amount_in)?;
+
+    // 5. Verify profit
+    let profit = final_bal - initial;
+    if profit <= params.min_profit as u64 {
+        return Err(ArbitrageFailed.into());
+    }
+
+    Ok(())
+}
+```
+
+### 14.6 Capital Requirements Comparison
+
+```
+Without flashloan:
+  - Need to hold SOL for every trade
+  - Capital locked = max concurrent trade size
+  - Typical: 1-10 SOL per bot instance
+
+With flashloan:
+  - Only need SOL for: Jito tips + tx fees
+  - Capital locked ≈ 0.01 SOL
+  - Can execute arbs of any size (limited by vault liquidity)
+```
+
+---
+
+## 15. DEX-Specific Special Handling
+
+Several DEXes require protocol-specific handling beyond standard CPI.
+
+### 15.1 Pump.fun Ecosystem
+
+Pump.fun has the most complex account requirements:
+
+```
+Standard accounts:
+  - program_id, pool, global_config, event_authority
+  - coin_creator_vault_ata (PDA: creator's token account)
+  - coin_creator_vault_authority
+  - protocol_fee_recipient + protocol_fee_recipient_ata
+  - base_vault, quote_vault
+
+Additional infrastructure:
+  - global_volume_accumulator (PDA: [b"global_volume_accumulator"])
+  - user_volume_accumulator (PDA: [b"user_volume_accumulator", wallet])
+  - fee_program (pfeeUxB6jkeY1Hxd7CsFCAjcbHA9rWtchMGdZ6VojVZ)
+  - fee_config (5PHirr8joyTMp9JMm6nW7hNDVyEYdkzDqazxPD7RaTjx)
+
+Mayhem mode:
+  - is_mayhem_mode flag on pool data → switches fee wallet
+  - Must detect and route fees to correct wallet
+```
+
+**Off-chain must pre-derive** all PDA accounts for Pump.fun pools. These are per-wallet and per-pool, not just per-pool.
+
+### 15.2 Humidifi XOR-Encoded Pool Data
+
+Humidifi deliberately obfuscates pool data with XOR encoding:
+
+```rust
+const XOR_KEYS: [u64; 4] = [
+    0xfb5c_e87a_ae44_3c38,
+    0x04a2_1784_51ba_c3c7,
+    0x04a1_1787_51b9_c3c6,
+    0x04a0_1786_51b8_c3c5,
+];
+
+fn decode_pubkey(encoded: &[u8; 32]) -> Pubkey {
+    let mut decoded = [0u8; 32];
+    for i in 0..4 {
+        let chunk = u64::from_le_bytes(encoded[i*8..(i+1)*8].try_into().unwrap());
+        let decrypted = chunk ^ XOR_KEYS[i];
+        decoded[i*8..(i+1)*8].copy_from_slice(&decrypted.to_le_bytes());
+    }
+    Pubkey::new_from_array(decoded)
+}
+```
+
+This must be applied during pool parsing to extract real vault and authority addresses.
+
+### 15.3 Meteora DAMM Vault-in-Vault
+
+Meteora Dynamic AMM pools use an indirect vault structure:
+
+```
+Pool account → pool.token_a_vault → vault_object → vault_object.token_vault
+                                                     ↑ this is the REAL token vault
+```
+
+During pool initialization, an extra account fetch is needed:
+1. Fetch pool account → get `token_a_vault` and `token_b_vault` addresses
+2. Fetch vault accounts → get `vault.token_vault` for each
+3. Use the inner `token_vault` addresses in the CPI
+
+### 15.4 Vertigo PDA-Derived Vaults
+
+Vertigo pools derive vaults via PDA instead of storing them:
+
+```rust
+let (vault_a, _) = Pubkey::find_program_address(
+    &[b"vault", pool.as_ref(), mint_a.as_ref()],
+    &VERTIGO_PROGRAM_ID,
+);
+```
+
+Plus a unique `pool_owner` field that must be passed to the on-chain instruction.
+
+### 15.5 PancakeSwap / Byreal CLMM Reuse
+
+PancakeSwap and Byreal use the **exact same pool data layout** as Raydium CLMM. The off-chain parser can reuse Raydium CLMM deserialization with different program IDs:
+
+```rust
+fn parse_clmm_pool(data: &[u8], program_id: &Pubkey) -> PoolState {
+    // Same layout for Raydium CLMM, PancakeSwap, and Byreal
+    let pool = RaydiumClmmLayout::deserialize(data);
+    PoolState {
+        dex_type: match program_id {
+            RAYDIUM_CLMM_ID => DEX_RAYDIUM_CLMM,
+            PANCAKESWAP_ID => DEX_PANCAKESWAP,
+            BYREAL_ID => DEX_BYREAL,
+            _ => unreachable!(),
+        },
+        ..pool.into()
+    }
+}
+```
+
+### 15.6 Heaven Dual-Base Support
+
+Heaven pools can have either SOL or USDC as base (unlike most DEXes that are SOL-only):
+
+```rust
+fn is_heaven_supported(pool: &HeavenPool) -> bool {
+    pool.mint_a == SOL_MINT || pool.mint_a == USDC_MINT ||
+    pool.mint_b == SOL_MINT || pool.mint_b == USDC_MINT
+}
+```
+
+This must be handled in the mixed-mode detection (Chapter 12).
+
+---
+
+## 16. Blockhash Management
+
+### 16.1 Background Refresh
+
+```rust
+// utils/blockhash.rs
+
+struct BlockhashCache {
+    hash: Arc<RwLock<Hash>>,
+}
+
+impl BlockhashCache {
+    async fn start_refresh_loop(&self, rpc: RpcClient) {
+        let cache = self.hash.clone();
+        tokio::spawn(async move {
+            loop {
+                match rpc.get_latest_blockhash().await {
+                    Ok(hash) => {
+                        *cache.write().await = hash;
+                    }
+                    Err(e) => {
+                        tracing::warn!("Blockhash refresh failed: {}", e);
+                        // Keep using old hash, valid for ~60-90s
+                    }
+                }
+                tokio::time::sleep(Duration::from_secs(10)).await;
+            }
+        });
+    }
+
+    async fn get(&self) -> Hash {
+        *self.hash.read().await
+    }
+}
+```
+
+### 16.2 Why 10 Seconds
+
+```
+Solana blockhash validity: ~60-90 seconds (150 slots × 400ms)
+Refresh interval: 10 seconds
+Max staleness: 10 seconds (worst case: refresh just failed + next attempt)
+Safety margin: 50-80 seconds before expiry
+
+This is conservative. Could reduce to 5s for lower staleness,
+but 10s minimizes RPC calls while staying well within validity.
+```
+
+### 16.3 Integration with Pipeline
+
+The blockhash cache is shared across all pipeline stages via `Arc<RwLock<Hash>>`. The executor reads it just before building the transaction — no RPC call in the hot path.
+
+```
+Impact on latency: eliminates ~20-50ms RPC call from the execution path
+```
+
+---
+
+## 17. Configuration
 
 ```toml
 # config.toml
 
 [general]
-base_mint = "So11111111111111111111111111111111111111112"  # WSOL
+base_mints = [
+    "So11111111111111111111111111111111111111112",   # WSOL (primary)
+    "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v", # USDC (bridge)
+    "F1uxquJMBWPqd8RfaBEp3bz4JBNTLBkPfkPxbmGfVNMN", # USD1 (bridge)
+]
 min_profit_lamports = 1000
 max_hops = 4
 
@@ -1137,6 +1842,28 @@ tier2_eval_window_sec = 300          # Evaluation window (5 min)
 tier2_demote_after_sec = 1800        # Demote if unused for 30 min
 ephemeral_cleanup_interval_sec = 300 # Clean up unused Tier 3 ALTs every 5 min
 max_alts_per_tx = 3                  # Max ALTs referenced per transaction (1 reserved for Tier 0)
+
+[flashloan]
+enabled = true
+vault_authorities = [
+    "5LFpzqgsxrSfhKwbaFiAEJ2kbc9QyimjKueswsyU4T3o",
+    "4B2yxi8n7jr8w3K7cssokLNJZ6k2NjiwKwLdQ8L9dbAA",
+]
+
+[anti_fingerprint]
+cu_jitter_range = 1000               # Random 0..N added to CU limit
+fee_collectors_sol = [
+    "GPpkDpzCDmYJY5qNhYmM14c7rct1zmkjWc2CjR5g7RZ1",
+    "J6c7noBHvWju4mMA3wXt3igbBSp2m9ATbA6cjMtAUged",
+    "BjsfwxDu7GX7RRW6oSRTpMkASdXAgCcHnXEcatqSfuuY",
+]
+fee_collector_usdc = "GzVRuLF349u78FHpr8KbqMhrZ1aDxnhSF59JWiZ6tbgt"
+
+[blockhash]
+refresh_interval_sec = 10
+
+[wallet]
+private_key = "$WALLET_PRIVATE_KEY"  # Supports $ENV_VAR substitution
 
 [pools]
 addresses = [
