@@ -42,9 +42,9 @@ Stage 2 Engine
 │  4. Anti-fingerprint: CU jitter + random tip/fee  │
 │  5. Parallel ed25519 signing (2 variants)         │
 │  6. Multi-sender concurrent submit:               │
-│     ├─ Jito gRPC sendBundle (N regions)           │
-│     ├─ Flashblock sendTransaction                 │
-│     └─ Astralane sendTransaction (10 regions)     │
+│     ├─ Jito gRPC sendBundle (N regions)            │
+│     ├─ Flashblock sendTransaction (N regions)     │
+│     └─ Astralane sendTransaction (N regions)      │
 └─────────────────────────────────────────────────┘
 
 ┌─────────────────────────────────────────────────┐
@@ -227,9 +227,14 @@ min_operator_profit_lamports = 5000
 
 [flashblock]
 enabled = true
-endpoint = "https://api.flashblock.trade"
 api_key = "<key>"
 cu_price_percentage = 30
+endpoints = [
+    "https://fra.flashblock.trade",
+    "https://ams.flashblock.trade",
+    "https://nyc.flashblock.trade",
+    "https://tok.flashblock.trade",
+]
 
 [astralane]
 enabled = true
@@ -308,7 +313,9 @@ if config.jito.enabled {
     }
 }
 if config.flashblock.enabled {
-    futures.push(flashblock_sender.send(tx_swqos));
+    for endpoint in &config.flashblock.endpoints {
+        futures.push(flashblock_sender.send(endpoint, tx_swqos));
+    }
 }
 if config.astralane.enabled {
     for endpoint in &config.astralane.endpoints {
