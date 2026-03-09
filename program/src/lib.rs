@@ -1,7 +1,6 @@
 #![no_std]
 
 mod accounts;
-mod flashloan;
 mod swap;
 
 use pinocchio::{

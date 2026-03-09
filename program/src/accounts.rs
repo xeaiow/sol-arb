@@ -52,7 +52,6 @@ pub struct HopInfo {
 pub struct SwapInstruction {
     pub hop_count: u8,
     pub hops: [HopInfo; 4],
-    pub use_flashloan: bool,
     pub amount_in: u64,
     pub min_profit: u32,
 }
@@ -91,7 +90,7 @@ impl SwapInstruction {
         let buy_dex = DexType::from_u8(data[0])?;
         let sell_dex = DexType::from_u8(data[1])?;
         let flags = data[2];
-        let use_flashloan = (flags >> 4) & 1 == 1;
+        // flags: bit0=buy_a_to_b, bit1=sell_a_to_b, bit2=buy_2022, bit3=sell_2022
 
         let mut hops = [default_hop(), default_hop(), default_hop(), default_hop()];
 
@@ -164,7 +163,6 @@ impl SwapInstruction {
         Ok(SwapInstruction {
             hop_count,
             hops,
-            use_flashloan,
             amount_in,
             min_profit,
         })
@@ -187,24 +185,14 @@ pub const ACCT_SYSTEM: usize = 7;
 /// Per-intermediate-token: 3 accounts (mint, token_program, user_ata)
 pub const INTERMEDIATE_ACCOUNTS_PER_TOKEN: usize = 3;
 
-/// Flashloan: 3 accounts (marginfi_program, bank, bank_vault)
-pub const FLASHLOAN_ACCOUNT_COUNT: usize = 3;
-
 /// Calculate the starting index of pool accounts for a given hop
 pub fn pool_accounts_start(
     hop_count: u8,
-    use_flashloan: bool,
     hop_index: u8,
     hops: &[HopInfo; 4],
 ) -> usize {
     let mut offset = HEADER_SIZE;
-    // Intermediate token accounts: (hop_count - 1) × 3
     offset += (hop_count as usize - 1) * INTERMEDIATE_ACCOUNTS_PER_TOKEN;
-    // Flashloan accounts
-    if use_flashloan {
-        offset += FLASHLOAN_ACCOUNT_COUNT;
-    }
-    // Pool accounts for previous hops
     for i in 0..hop_index as usize {
         offset += hops[i].dex_type.pool_account_count();
     }
