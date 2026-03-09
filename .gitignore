@@ -1,0 +1,26 @@
+# Rust build artifacts
+target/
+debug/
+**/*.rs.bk
+*.pdb
+
+# Cargo lock for libraries (keep for executables if needed)
+Cargo.lock
+
+# OS
+.DS_Store
+Thumbs.db
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+
+# Environment
+.env
+.env.*
+
+# Claude Code
+.claude/
