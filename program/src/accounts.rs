@@ -72,7 +72,7 @@ impl SwapInstruction {
         // data layout:
         // [0] buy_dex_type
         // [1] sell_dex_type
-        // [2] flags: bit0=buy_a_to_b, bit1=sell_a_to_b, bit2=buy_2022, bit3=sell_2022, bit4=flashloan
+        // [2] flags: bit0=buy_a_to_b, bit1=sell_a_to_b, bit2=buy_2022, bit3=sell_2022
         // For 3-hop: [3] mid_dex, [4] mid_flags (bit0=a_to_b, bit1=2022)
         // For 4-hop: [3] mid1_dex, [4] mid1_flags, [5] mid2_dex, [6] mid2_flags
         // Last 12 bytes: amount_in(u64 LE) + min_profit(u32 LE)

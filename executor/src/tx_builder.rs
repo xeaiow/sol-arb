@@ -11,11 +11,41 @@ use solana_sdk::{
 };
 use solana_system_interface::instruction as system_instruction;
 
-use arb_engine::opportunity::Opportunity;
+use arb_engine::opportunity::{Opportunity, PoolSnapshot};
+use solana_streamer_sdk::pool::state::DexType;
 
 use crate::alt::Tier0Alt;
 use crate::anti_fp;
 use crate::config::ExecutorConfigFile;
+
+// ── DEX Program IDs ──
+const RAYDIUM_CPMM_PROGRAM: Pubkey = solana_sdk::pubkey!("CPMMoo8L3F4NbTegBCKVNunggL7H1ZpdTHKxQB5qKP1C");
+const PUMPFUN_PROGRAM: Pubkey = solana_sdk::pubkey!("6EF8rrecthR5Dkzon8Nwu78hRvfCKubJ14M5uBEwF6P");
+const PUMPSWAP_PROGRAM: Pubkey = solana_sdk::pubkey!("pAMMBay6oceH9fJKBRHGP5D4bD4sWpmSwMn52FMfXEA");
+const BONKSWAP_PROGRAM: Pubkey = solana_sdk::pubkey!("BSwp6bEBihVLdqJRKGgzjcGLHkcTuzmSo1TQkHepzH8p");
+
+// ── DEX Global PDAs / Constants ──
+const RAYDIUM_AMM_AUTHORITY: Pubkey = solana_sdk::pubkey!("5Q544fKrFoe6tsEbD7S8EmxGTJYAKtTVhAW5Q5pge4j1");
+const SYSVAR_RENT: Pubkey = solana_sdk::pubkey!("SysvarRent111111111111111111111111111111111");
+/// WSOL mint
+// ── PumpFun constants ──
+/// PumpFun global account (singleton, well-known)
+const PUMPFUN_GLOBAL: Pubkey = solana_sdk::pubkey!("4wTV1YmiEkRvAtNtsSGPtUrqRYQMe5SKy2uB4Jjaxnjf");
+/// PumpFun fee recipient (from global account)
+const PUMPFUN_FEE_RECIPIENT: Pubkey = solana_sdk::pubkey!("CebN5WGQ4jvEPvsVU4EoHEpgzq1VV7AbicfhtW4xC9iM");
+/// PumpFun fee program
+const PUMPFUN_FEE_PROGRAM: Pubkey = solana_sdk::pubkey!("pfeeUxB6jkeY1Hxd7CsFCAjcbHA9rWtchMGdZ6VojVZ");
+
+// ── PumpSwap constants ──
+/// PumpSwap global config (singleton, well-known)
+const PUMPSWAP_GLOBAL_CONFIG: Pubkey = solana_sdk::pubkey!("ADyA8hdefbFUWVfrRxCDdvo7EhBYic9nCR4jBdMZxW8R");
+/// PumpSwap protocol fee recipient
+const PUMPSWAP_PROTOCOL_FEE_RECIPIENT: Pubkey = solana_sdk::pubkey!("62qc2CNXwrYqQScmEdiZFFAnJR262PxxUZLtQ3iEQFhg");
+/// PumpSwap fee program (same as PumpFun)
+const PUMPSWAP_FEE_PROGRAM: Pubkey = solana_sdk::pubkey!("pfeeUxB6jkeY1Hxd7CsFCAjcbHA9rWtchMGdZ6VojVZ");
+
+// ── Meteora DAMM V2 constants ──
+const METEORA_DAMM_V2_PROGRAM: Pubkey = solana_sdk::pubkey!("cpamdpZCGKUy5JxQXB4dcpGPiikHawvSWAd6mEn1sGG");
 
 /// SPL Token program ID
 const SPL_TOKEN_PROGRAM_ID: Pubkey = solana_sdk::pubkey!("TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA");
@@ -83,7 +113,8 @@ impl TxBuilder {
             );
 
         Self {
-            program_id: config.executor.program_id.parse().unwrap(),
+            program_id: config.executor.program_id.parse()
+                .expect("Invalid program_id in config"),
             payer_pubkey,
             fee_collectors,
             cu_jitter_range: config.executor.anti_fingerprint.cu_jitter_range,
@@ -286,14 +317,327 @@ impl TxBuilder {
             metas.push(AccountMeta::new(intermediate_ata, false));             // user ATA
         }
 
-        // Per-hop pool accounts from snapshots
+        // Per-hop pool accounts — assembled per DEX type with correct ordering.
+        // PoolSnapshot.accounts layout: [pool_address, vault_a?, vault_b?, extra...]
         for snapshot in &opp.pool_snapshots {
-            for acct in &snapshot.accounts {
-                metas.push(AccountMeta::new(*acct, false));
-            }
+            let hop_metas = self.build_hop_accounts(snapshot);
+            metas.extend(hop_metas);
         }
 
         metas
+    }
+
+    /// Build the per-hop CPI account list for a single pool snapshot.
+    /// Must match the exact account ordering in program/src/swap.rs for each DEX.
+    /// PoolSnapshot.accounts: [pool_address, vault_a?, vault_b?, extra...]
+    fn build_hop_accounts(&self, snap: &PoolSnapshot) -> Vec<AccountMeta> {
+        let pool = snap.accounts.get(0).copied().unwrap_or_default();
+        let vault_a = snap.accounts.get(1).copied();
+        let vault_b = snap.accounts.get(2).copied();
+        let extra = if snap.accounts.len() > 3 { &snap.accounts[3..] } else { &[] };
+
+        // Determine user ATAs for input/output based on direction
+        let (input_mint, output_mint) = if snap.is_a_to_b {
+            (snap.mint_a, snap.mint_b)
+        } else {
+            (snap.mint_b, snap.mint_a)
+        };
+        let user_input_ata = derive_ata(&self.payer_pubkey, &input_mint);
+        let user_output_ata = derive_ata(&self.payer_pubkey, &output_mint);
+        let (input_vault, output_vault) = if snap.is_a_to_b {
+            (vault_a.unwrap_or_default(), vault_b.unwrap_or_default())
+        } else {
+            (vault_b.unwrap_or_default(), vault_a.unwrap_or_default())
+        };
+
+        match snap.dex_type {
+            // Raydium AMM V4: 8 accounts
+            // swap.rs: [token_program, amm, amm_authority, coin_vault, pc_vault,
+            //           user_source, user_dest, user_owner]
+            DexType::RaydiumAmmV4 => vec![
+                AccountMeta::new_readonly(SPL_TOKEN_PROGRAM_ID, false),
+                AccountMeta::new(pool, false),
+                AccountMeta::new_readonly(RAYDIUM_AMM_AUTHORITY, false),
+                AccountMeta::new(vault_a.unwrap_or_default(), false),
+                AccountMeta::new(vault_b.unwrap_or_default(), false),
+                AccountMeta::new(user_input_ata, false),
+                AccountMeta::new(user_output_ata, false),
+                AccountMeta::new_readonly(self.payer_pubkey, true),
+            ],
+
+            // Raydium CPMM: 13 accounts
+            // extra[0]=amm_config, extra[1]=observation_key
+            // swap.rs: [payer, authority, amm_config, pool_state, input_ata, output_ata,
+            //  input_vault, output_vault, input_token_program, output_token_program,
+            //  input_mint, output_mint, observation_state]
+            DexType::RaydiumCpmm => {
+                let amm_config = extra.first().copied().unwrap_or_default();
+                let observation = extra.get(1).copied().unwrap_or_default();
+                let (authority, _) = Pubkey::find_program_address(
+                    &[b"vault_and_lp_mint_auth_seed", pool.as_ref()],
+                    &RAYDIUM_CPMM_PROGRAM,
+                );
+                let input_token_prog = if snap.is_a_to_b && snap.mint_a_is_2022
+                    || !snap.is_a_to_b && snap.mint_b_is_2022 {
+                    TOKEN_2022_PROGRAM_ID
+                } else {
+                    SPL_TOKEN_PROGRAM_ID
+                };
+                let output_token_prog = if snap.is_a_to_b && snap.mint_b_is_2022
+                    || !snap.is_a_to_b && snap.mint_a_is_2022 {
+                    TOKEN_2022_PROGRAM_ID
+                } else {
+                    SPL_TOKEN_PROGRAM_ID
+                };
+                vec![
+                    AccountMeta::new(self.payer_pubkey, true),
+                    AccountMeta::new_readonly(authority, false),
+                    AccountMeta::new_readonly(amm_config, false),
+                    AccountMeta::new(pool, false),
+                    AccountMeta::new(user_input_ata, false),
+                    AccountMeta::new(user_output_ata, false),
+                    AccountMeta::new(input_vault, false),
+                    AccountMeta::new(output_vault, false),
+                    AccountMeta::new_readonly(input_token_prog, false),
+                    AccountMeta::new_readonly(output_token_prog, false),
+                    AccountMeta::new_readonly(input_mint, false),
+                    AccountMeta::new_readonly(output_mint, false),
+                    AccountMeta::new(observation, false),
+                ]
+            }
+
+            // Raydium CLMM: 10 accounts
+            // extra[0]=amm_config, extra[1]=observation_key, extra[2]=tick_array
+            // swap.rs: [payer, amm_config, pool_state, input_ata, output_ata,
+            //  input_vault, output_vault, observation, token_program, tick_array]
+            DexType::RaydiumClmm => {
+                let amm_config = extra.first().copied().unwrap_or_default();
+                let observation = extra.get(1).copied().unwrap_or_default();
+                let tick_array = extra.get(2).copied().unwrap_or_default();
+                vec![
+                    AccountMeta::new(self.payer_pubkey, true),
+                    AccountMeta::new_readonly(amm_config, false),
+                    AccountMeta::new(pool, false),
+                    AccountMeta::new(user_input_ata, false),
+                    AccountMeta::new(user_output_ata, false),
+                    AccountMeta::new(input_vault, false),
+                    AccountMeta::new(output_vault, false),
+                    AccountMeta::new(observation, false),
+                    AccountMeta::new_readonly(SPL_TOKEN_PROGRAM_ID, false),
+                    AccountMeta::new(tick_array, false),
+                ]
+            }
+
+            // PumpFun: 16 accounts (buy layout, sell uses 14 but on-chain slices)
+            // extra[0]=creator
+            // swap.rs: [global, fee_recipient, mint, bonding_curve, associated_bonding_curve,
+            //  associated_user, user, system, token_program, creator_vault, event_authority,
+            //  program, global_volume_accumulator, user_volume_accumulator, fee_config, fee_program]
+            DexType::PumpFun => {
+                let creator = extra.first().copied().unwrap_or_default();
+                let token_mint = snap.mint_a;
+                let bonding_curve = pool; // pool address IS the bonding curve
+                let associated_bonding_curve = derive_ata(&bonding_curve, &token_mint);
+                let associated_user = derive_ata(&self.payer_pubkey, &token_mint);
+                // creator_vault = creator (receives SOL directly)
+                let creator_vault = creator;
+                // event_authority PDA: ["__event_authority"]
+                let (event_authority, _) = Pubkey::find_program_address(
+                    &[b"__event_authority"],
+                    &PUMPFUN_PROGRAM,
+                );
+                // global_volume_accumulator PDA: ["global_volume_accumulator"]
+                let (global_volume_acc, _) = Pubkey::find_program_address(
+                    &[b"global_volume_accumulator"],
+                    &PUMPFUN_PROGRAM,
+                );
+                // user_volume_accumulator PDA: ["user_volume_accumulator", user]
+                let (user_volume_acc, _) = Pubkey::find_program_address(
+                    &[b"user_volume_accumulator", self.payer_pubkey.as_ref()],
+                    &PUMPFUN_PROGRAM,
+                );
+                // fee_config PDA of fee program: ["fee_config"]
+                let (fee_config, _) = Pubkey::find_program_address(
+                    &[b"fee_config"],
+                    &PUMPFUN_FEE_PROGRAM,
+                );
+                vec![
+                    AccountMeta::new_readonly(PUMPFUN_GLOBAL, false),       // [0] global
+                    AccountMeta::new(PUMPFUN_FEE_RECIPIENT, false),         // [1] fee_recipient
+                    AccountMeta::new_readonly(token_mint, false),            // [2] mint
+                    AccountMeta::new(bonding_curve, false),                  // [3] bonding_curve
+                    AccountMeta::new(associated_bonding_curve, false),       // [4] associated_bonding_curve
+                    AccountMeta::new(associated_user, false),               // [5] associated_user
+                    AccountMeta::new(self.payer_pubkey, true),              // [6] user
+                    AccountMeta::new_readonly(SYSTEM_PROGRAM_ID, false),    // [7] system_program
+                    AccountMeta::new_readonly(SPL_TOKEN_PROGRAM_ID, false), // [8] token_program
+                    AccountMeta::new(creator_vault, false),                 // [9] creator_vault
+                    AccountMeta::new_readonly(event_authority, false),      // [10] event_authority
+                    AccountMeta::new_readonly(PUMPFUN_PROGRAM, false),      // [11] program
+                    AccountMeta::new(global_volume_acc, false),             // [12] global_volume_accumulator
+                    AccountMeta::new(user_volume_acc, false),               // [13] user_volume_accumulator
+                    AccountMeta::new_readonly(fee_config, false),           // [14] fee_config
+                    AccountMeta::new_readonly(PUMPFUN_FEE_PROGRAM, false),  // [15] fee_program
+                ]
+            }
+
+            // PumpSwap: 23 accounts (buy layout, sell uses 21 but on-chain slices)
+            // extra[0]=coin_creator
+            // swap.rs: [pool, user, global_config, base_mint, quote_mint,
+            //  user_base_ata, user_quote_ata, pool_base_vault, pool_quote_vault,
+            //  protocol_fee_recipient, protocol_fee_recipient_ata,
+            //  base_token_program, quote_token_program, system, ata_program,
+            //  event_authority, program, coin_creator_vault_ata, coin_creator_vault_authority,
+            //  global_volume_accumulator, user_volume_accumulator, fee_config, fee_program]
+            DexType::PumpSwap => {
+                let _coin_creator = extra.first().copied().unwrap_or_default();
+                let base_mint = snap.mint_a;
+                let quote_mint = snap.mint_b;
+                let user_base_ata = derive_ata(&self.payer_pubkey, &base_mint);
+                let user_quote_ata = derive_ata(&self.payer_pubkey, &quote_mint);
+                let pool_base_vault = vault_a.unwrap_or_default();
+                let pool_quote_vault = vault_b.unwrap_or_default();
+                // protocol_fee_recipient_token_account = ATA(protocol_fee_recipient, quote_mint)
+                let protocol_fee_recipient_ata = derive_ata(&PUMPSWAP_PROTOCOL_FEE_RECIPIENT, &quote_mint);
+                let base_token_prog = if snap.mint_a_is_2022 { TOKEN_2022_PROGRAM_ID } else { SPL_TOKEN_PROGRAM_ID };
+                let quote_token_prog = if snap.mint_b_is_2022 { TOKEN_2022_PROGRAM_ID } else { SPL_TOKEN_PROGRAM_ID };
+                // event_authority PDA: ["__event_authority"]
+                let (event_authority, _) = Pubkey::find_program_address(
+                    &[b"__event_authority"],
+                    &PUMPSWAP_PROGRAM,
+                );
+                // coin_creator_vault_authority PDA: ["coin_creator_vault_authority", pool]
+                let (coin_creator_vault_authority, _) = Pubkey::find_program_address(
+                    &[b"coin_creator_vault_authority", pool.as_ref()],
+                    &PUMPSWAP_PROGRAM,
+                );
+                // coin_creator_vault_ata = ATA(coin_creator_vault_authority, quote_mint)
+                let coin_creator_vault_ata = derive_ata(&coin_creator_vault_authority, &quote_mint);
+                // global_volume_accumulator PDA
+                let (global_volume_acc, _) = Pubkey::find_program_address(
+                    &[b"global_volume_accumulator"],
+                    &PUMPSWAP_PROGRAM,
+                );
+                // user_volume_accumulator PDA
+                let (user_volume_acc, _) = Pubkey::find_program_address(
+                    &[b"user_volume_accumulator", self.payer_pubkey.as_ref()],
+                    &PUMPSWAP_PROGRAM,
+                );
+                // fee_config PDA
+                let (fee_config, _) = Pubkey::find_program_address(
+                    &[b"fee_config"],
+                    &PUMPSWAP_FEE_PROGRAM,
+                );
+                vec![
+                    AccountMeta::new(pool, false),                                  // [0] pool
+                    AccountMeta::new(self.payer_pubkey, true),                      // [1] user
+                    AccountMeta::new_readonly(PUMPSWAP_GLOBAL_CONFIG, false),       // [2] global_config
+                    AccountMeta::new_readonly(base_mint, false),                    // [3] base_mint
+                    AccountMeta::new_readonly(quote_mint, false),                   // [4] quote_mint
+                    AccountMeta::new(user_base_ata, false),                         // [5] user_base_token_account
+                    AccountMeta::new(user_quote_ata, false),                        // [6] user_quote_token_account
+                    AccountMeta::new(pool_base_vault, false),                       // [7] pool_base_token_account
+                    AccountMeta::new(pool_quote_vault, false),                      // [8] pool_quote_token_account
+                    AccountMeta::new(PUMPSWAP_PROTOCOL_FEE_RECIPIENT, false),       // [9] protocol_fee_recipient
+                    AccountMeta::new(protocol_fee_recipient_ata, false),            // [10] protocol_fee_recipient_ata
+                    AccountMeta::new_readonly(base_token_prog, false),              // [11] base_token_program
+                    AccountMeta::new_readonly(quote_token_prog, false),             // [12] quote_token_program
+                    AccountMeta::new_readonly(SYSTEM_PROGRAM_ID, false),            // [13] system_program
+                    AccountMeta::new_readonly(ATA_PROGRAM_ID, false),               // [14] associated_token_program
+                    AccountMeta::new_readonly(event_authority, false),              // [15] event_authority
+                    AccountMeta::new_readonly(PUMPSWAP_PROGRAM, false),             // [16] program
+                    AccountMeta::new(coin_creator_vault_ata, false),                // [17] coin_creator_vault_ata
+                    AccountMeta::new_readonly(coin_creator_vault_authority, false), // [18] coin_creator_vault_authority
+                    AccountMeta::new(global_volume_acc, false),                     // [19] global_volume_accumulator
+                    AccountMeta::new(user_volume_acc, false),                       // [20] user_volume_accumulator
+                    AccountMeta::new_readonly(fee_config, false),                   // [21] fee_config
+                    AccountMeta::new_readonly(PUMPSWAP_FEE_PROGRAM, false),         // [22] fee_program
+                ]
+            }
+
+            // Bonkswap: 17 accounts
+            // extra[0]=global_config (state), extra[1]=platform_config
+            // swap.rs: [state, pool, token_x, token_y, pool_x_account, pool_y_account,
+            //  swapper_x_account, swapper_y_account, swapper, referrer_x_account,
+            //  referrer_y_account, referrer, program_authority, system, token_program,
+            //  associated_token_program, rent]
+            DexType::Bonk => {
+                let global_config = extra.first().copied().unwrap_or_default();
+                let _platform_config = extra.get(1).copied().unwrap_or_default();
+                let token_x = snap.mint_a;
+                let token_y = snap.mint_b;
+                let pool_x_account = vault_a.unwrap_or_default();
+                let pool_y_account = vault_b.unwrap_or_default();
+                let swapper_x = derive_ata(&self.payer_pubkey, &token_x);
+                let swapper_y = derive_ata(&self.payer_pubkey, &token_y);
+                // program_authority PDA: ["authority"]
+                let (program_authority, _) = Pubkey::find_program_address(
+                    &[b"authority"],
+                    &BONKSWAP_PROGRAM,
+                );
+                // referrer = payer (self-referral, no-op fees)
+                let referrer = self.payer_pubkey;
+                let referrer_x = derive_ata(&referrer, &token_x);
+                let referrer_y = derive_ata(&referrer, &token_y);
+                vec![
+                    AccountMeta::new_readonly(global_config, false),        // [0] state
+                    AccountMeta::new(pool, false),                          // [1] pool
+                    AccountMeta::new_readonly(token_x, false),              // [2] token_x
+                    AccountMeta::new_readonly(token_y, false),              // [3] token_y
+                    AccountMeta::new(pool_x_account, false),                // [4] pool_x_account
+                    AccountMeta::new(pool_y_account, false),                // [5] pool_y_account
+                    AccountMeta::new(swapper_x, false),                     // [6] swapper_x_account
+                    AccountMeta::new(swapper_y, false),                     // [7] swapper_y_account
+                    AccountMeta::new(self.payer_pubkey, true),              // [8] swapper
+                    AccountMeta::new(referrer_x, false),                    // [9] referrer_x_account
+                    AccountMeta::new(referrer_y, false),                    // [10] referrer_y_account
+                    AccountMeta::new_readonly(referrer, false),             // [11] referrer
+                    AccountMeta::new_readonly(program_authority, false),    // [12] program_authority
+                    AccountMeta::new_readonly(SYSTEM_PROGRAM_ID, false),    // [13] system_program
+                    AccountMeta::new_readonly(SPL_TOKEN_PROGRAM_ID, false), // [14] token_program
+                    AccountMeta::new_readonly(ATA_PROGRAM_ID, false),       // [15] associated_token_program
+                    AccountMeta::new_readonly(SYSVAR_RENT, false),          // [16] rent
+                ]
+            }
+
+            // Meteora DAMM V2: 14 accounts
+            // swap.rs: [pool_authority, pool, input_token_account, output_token_account,
+            //  token_a_vault, token_b_vault, token_a_mint, token_b_mint, payer,
+            //  token_a_program, token_b_program, referral_token_account,
+            //  event_authority, program]
+            DexType::MeteoraDammV2 => {
+                // pool_authority PDA: seeds depend on Meteora impl; commonly ["pool_authority", pool]
+                let (pool_authority, _) = Pubkey::find_program_address(
+                    &[b"pool_authority", pool.as_ref()],
+                    &METEORA_DAMM_V2_PROGRAM,
+                );
+                let token_a_prog = if snap.mint_a_is_2022 { TOKEN_2022_PROGRAM_ID } else { SPL_TOKEN_PROGRAM_ID };
+                let token_b_prog = if snap.mint_b_is_2022 { TOKEN_2022_PROGRAM_ID } else { SPL_TOKEN_PROGRAM_ID };
+                // event_authority PDA
+                let (event_authority, _) = Pubkey::find_program_address(
+                    &[b"__event_authority"],
+                    &METEORA_DAMM_V2_PROGRAM,
+                );
+                // referral_token_account: use payer's quote ATA as self-referral (0 fees)
+                let referral_token_account = derive_ata(&self.payer_pubkey, &snap.mint_b);
+                vec![
+                    AccountMeta::new_readonly(pool_authority, false),       // [0] pool_authority
+                    AccountMeta::new(pool, false),                          // [1] pool
+                    AccountMeta::new(user_input_ata, false),                // [2] input_token_account
+                    AccountMeta::new(user_output_ata, false),               // [3] output_token_account
+                    AccountMeta::new(vault_a.unwrap_or_default(), false),   // [4] token_a_vault
+                    AccountMeta::new(vault_b.unwrap_or_default(), false),   // [5] token_b_vault
+                    AccountMeta::new_readonly(snap.mint_a, false),          // [6] token_a_mint
+                    AccountMeta::new_readonly(snap.mint_b, false),          // [7] token_b_mint
+                    AccountMeta::new(self.payer_pubkey, true),              // [8] payer
+                    AccountMeta::new_readonly(token_a_prog, false),         // [9] token_a_program
+                    AccountMeta::new_readonly(token_b_prog, false),         // [10] token_b_program
+                    AccountMeta::new(referral_token_account, false),        // [11] referral_token_account
+                    AccountMeta::new_readonly(event_authority, false),      // [12] event_authority
+                    AccountMeta::new_readonly(METEORA_DAMM_V2_PROGRAM, false), // [13] program
+                ]
+            }
+        }
     }
 
     fn calculate_jito_tip(&self, expected_profit: u64) -> Option<u64> {
