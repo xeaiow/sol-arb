@@ -23,6 +23,9 @@ pub fn execute(
 
     if ix.use_flashloan {
         let fl_start = HEADER_SIZE + (ix.hop_count as usize - 1) * INTERMEDIATE_ACCOUNTS_PER_TOKEN;
+        if fl_start + FLASHLOAN_ACCOUNT_COUNT > accounts.len() {
+            return Err(ProgramError::NotEnoughAccountKeys);
+        }
         let fl_accounts = &accounts[fl_start..fl_start + FLASHLOAN_ACCOUNT_COUNT];
         crate::flashloan::flash_borrow(fl_accounts, ix.amount_in)?;
     }
@@ -47,6 +50,9 @@ pub fn execute(
 
     if ix.use_flashloan {
         let fl_start = HEADER_SIZE + (ix.hop_count as usize - 1) * INTERMEDIATE_ACCOUNTS_PER_TOKEN;
+        if fl_start + FLASHLOAN_ACCOUNT_COUNT > accounts.len() {
+            return Err(ProgramError::NotEnoughAccountKeys);
+        }
         let fl_accounts = &accounts[fl_start..fl_start + FLASHLOAN_ACCOUNT_COUNT];
         crate::flashloan::flash_repay(fl_accounts, ix.amount_in)?;
     }
