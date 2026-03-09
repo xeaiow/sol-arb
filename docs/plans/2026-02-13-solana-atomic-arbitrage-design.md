@@ -9,7 +9,7 @@
 | Hop Strategy | Dynamic N-hop (fixed instruction variants: 2/3/4-hop) |
 | Route Search | Pre-built route table + incremental scan (microsecond latency) |
 | DEX Coverage | All 35 DEXes (via dex-pinocchio-cpi) |
-| Transaction Delivery | Jito Bundle (fail = no cost) |
+| Transaction Delivery | Multi-channel parallel: Jito Bundle + Flashblock SWQoS + Astralane SWQoS |
 | Pool Data Source | gRPC Geyser real-time push |
 | Profit Calculation | Fully off-chain; on-chain is pure execution + verification |
 | Simulation | Skipped in production (Jito bundle failure = no cost) |
@@ -49,9 +49,11 @@
 │  └──────────────┬───────────────────────┘                │
 │                 │                                        │
 │  ┌──────────────▼───────────────────────┐                │
-│  │ Executor                              │                │
+│  │ Executor (MultiSender)                │                │
 │  │ - Build instruction data + accounts   │                │
-│  │ - Jito Bundle submission              │                │
+│  │ - Build 2 tx variants (Jito / SWQoS) │                │
+│  │ - Parallel submit: Jito + Flashblock  │                │
+│  │   + Astralane (first-landed wins)     │                │
 │  └──────────────────────────────────────┘                │
 └─────────────────────────────────────────────────────────┘
                           │
@@ -129,14 +131,17 @@ onchain-arb/
 │       │   │   ├── stable_swap.rs       # Saber, Stabble StableSwap
 │       │   │   ├── weighted.rs          # Stabble WeightedSwap
 │       │   │   └── bonding_curve.rs     # Pump.fun, Vertigo, DBC
-│       │   ├── optimizer.rs        # Binary search for optimal amount_in
+│       │   ├── optimizer.rs        # Ternary search for optimal amount_in (unimodal profit)
 │       │   └── profit.rs           # net_profit = output - input - gas - jito_tip
 │       │
 │       ├── executor/               # Execution layer
 │       │   ├── mod.rs
 │       │   ├── tx_builder.rs       # Assemble instruction data + accounts
 │       │   ├── simulator.rs        # simulateTransaction (debug/test only)
-│       │   └── jito.rs             # Jito bundle gRPC submission
+│       │   ├── multi_sender.rs     # Multi-channel parallel submission dispatcher
+│       │   ├── jito.rs             # Jito bundle gRPC submission
+│       │   ├── flashblock.rs       # Flashblock SWQoS submission
+│       │   └── astralane.rs        # Astralane SWQoS submission
 │       │
 │       ├── alt/                    # Address Lookup Table management
 │       │   ├── mod.rs
@@ -431,7 +436,49 @@ enum PoolMath {
         params: [u64; 8],              // Curve-specific parameters
     },
 }
+```
 
+#### f64 Fast-Path Optimization
+
+Off-chain math uses **f64 floating-point** instead of on-chain u64/u128 integer arithmetic. This is a deliberate precision-speed tradeoff:
+
+```
+On-chain (u64/u128 integer):     exact, required for CPI
+Off-chain (f64 floating-point):  ~15 significant digits, sufficient for routing decisions
+
+Performance difference:
+  ConstantProduct (f64):   ~0.5 μs per quote
+  ConstantProduct (u128):  ~3 μs per quote
+  CLMM tick traversal:     f64 avoids u256 intermediate overflow handling
+```
+
+The off-chain math only needs to answer two questions: (1) does this route have positive profit? (2) roughly what input amount maximizes it? Both tolerate f64's ~10⁻¹⁵ relative error. The on-chain program performs the actual swap with exact integer math — any f64 imprecision is caught by the `min_profit` safety check.
+
+```rust
+impl PoolMath {
+    /// Fast f64 quote for off-chain routing decisions.
+    /// NOT used on-chain — on-chain uses exact DEX CPI.
+    fn get_amount_out(&self, amount_in: u64, is_a_to_b: bool) -> u64 {
+        match self {
+            PoolMath::ConstantProduct { reserve_a, reserve_b, fee_numerator, fee_denominator } => {
+                let (r_in, r_out) = if is_a_to_b {
+                    (*reserve_a as f64, *reserve_b as f64)
+                } else {
+                    (*reserve_b as f64, *reserve_a as f64)
+                };
+                let fee = *fee_numerator as f64 / *fee_denominator as f64;
+                let amt = amount_in as f64 * (1.0 - fee);
+                let out = (r_out * amt) / (r_in + amt);
+                out as u64
+            }
+            // CLMM, DLMM, etc: same principle — f64 throughout
+            _ => todo!(),
+        }
+    }
+}
+```
+
+```rust
 struct PoolState {
     address: Pubkey,
     dex_type: u8,                       // 0-34
@@ -509,6 +556,70 @@ Per pool-update scan:
 5. Consecutive N negative-profit calculations -> lower scan priority
 6. Pool with no updates for extended period -> mark as stale
 
+### 4.5 Optimal Input Amount (Ternary Search)
+
+After finding a route with positive spread, the optimizer finds the input amount that maximizes profit. The profit function `f(amount_in)` is **unimodal** (single-peak): too little input under-exploits the spread, too much input gets eaten by slippage. Ternary search is the natural fit.
+
+```rust
+// engine/optimizer.rs
+
+/// Find optimal amount_in that maximizes profit for a given route.
+/// Profit function is unimodal: rises to a peak, then falls.
+/// Ternary search converges in O(log₃(range)) iterations.
+fn find_optimal_amount(
+    route: &Route,
+    pool_cache: &PoolStateCache,
+    max_amount: u64,               // Upper bound (wallet balance or flashloan limit)
+) -> Option<(u64, u64)> {          // Returns (optimal_amount_in, expected_profit)
+    let mut lo: u64 = 1_000;       // Min meaningful input (~0.000001 SOL)
+    let mut hi: u64 = max_amount;
+
+    // 10 iterations: search range shrinks to 1/59049 (~0.002%)
+    for _ in 0..10 {
+        let m1 = lo + (hi - lo) / 3;
+        let m2 = hi - (hi - lo) / 3;
+
+        let p1 = simulate_route_profit(route, pool_cache, m1);
+        let p2 = simulate_route_profit(route, pool_cache, m2);
+
+        if p1 < p2 {
+            lo = m1;
+        } else {
+            hi = m2;
+        }
+    }
+
+    let optimal = (lo + hi) / 2;
+    let profit = simulate_route_profit(route, pool_cache, optimal);
+
+    if profit > 0 {
+        Some((optimal, profit as u64))
+    } else {
+        None
+    }
+}
+
+/// Simulate full route profit for a given input amount.
+/// Uses local math (no RPC), microsecond-level per call.
+fn simulate_route_profit(
+    route: &Route,
+    pool_cache: &PoolStateCache,
+    amount_in: u64,
+) -> i64 {
+    let mut current = amount_in;
+    for hop in &route.hops {
+        let pool = &pool_cache[hop.pool_index];
+        current = pool.math.get_amount_out(current, hop.is_a_to_b);
+        if current == 0 { return i64::MIN; }  // Pool depleted
+    }
+    current as i64 - amount_in as i64         // Raw profit (gas/tip deducted later)
+}
+```
+
+**Performance:** 10 iterations × 2 evaluations × ~1-50 μs per evaluation = **~20-1000 μs** total. For 2-hop AMM routes this is ~20 μs; for routes with CLMM/DLMM hops, ~200-1000 μs.
+
+**Why not binary search:** Binary search requires monotonicity. The profit function is NOT monotonic — it rises then falls. Using binary search on a unimodal function requires computing derivatives (difference of adjacent evaluations) to determine direction, which is fragile near the peak and effectively degenerates into ternary search with extra complexity.
+
 ---
 
 ## 5. gRPC Feed & Pipeline
@@ -536,11 +647,16 @@ struct GeyserFeed {
 Lock-free async pipeline connected via channels:
 
 ```
-┌─────────┐    ┌──────────┐    ┌─────────┐    ┌──────────┐
-│ gRPC    │───→│ Parser   │───→│ Scanner │───→│ Executor │
-│ Receiver│    │ Workers  │    │         │    │          │
-└─────────┘    └──────────┘    └─────────┘    └──────────┘
-  1 thread      N threads       1 thread       1 thread
+┌─────────┐    ┌──────────┐    ┌─────────┐    ┌──────────────┐
+│ gRPC    │───→│ Parser   │───→│ Scanner │───→│ Executor     │
+│ Receiver│    │ Workers  │    │         │    │ (MultiSender)│
+└─────────┘    └──────────┘    └─────────┘    └──────┬───────┘
+  1 thread      N threads       1 thread        1 thread
+                                                     │
+                                              ┌──────┼──────┐
+                                              ▼      ▼      ▼
+                                           Jito  Flashblk Astralane
+                                           (gRPC) (SWQoS) (SWQoS)
 
 channels:     channels:       channels:
 AccountUpdate  PoolUpdate      Opportunity
@@ -575,16 +691,43 @@ async fn main() {
     // Stage 3: Scanner (single thread, holds route table)
     tokio::spawn(scanner_loop(parsed_rx, opp_tx, pool_cache, route_table));
 
-    // Stage 4: Executor (single thread, Jito submission)
-    tokio::spawn(executor_loop(opp_rx, config.jito, pool_cache));
+    // Stage 4: Executor (single thread, multi-channel parallel submission)
+    let multi_sender = MultiSender::new(&config, keypair.clone());
+    tokio::spawn(executor_loop(opp_rx, multi_sender, pool_cache));
 }
 ```
 
 ---
 
-## 6. Executor & Jito Integration
+## 6. Executor & Multi-Channel Submission
 
-### 6.1 Opportunity Structure
+### 6.1 Why Multi-Channel
+
+Different slot leaders have different network proximity to each submission service. A single channel means missing opportunities when the current leader is far from that service. Multi-channel parallel submission maximizes landing probability.
+
+From community consensus: "jito、temp、0slot 一起发" — top players always send through multiple channels simultaneously.
+
+### 6.2 Channel Selection
+
+| Channel | Type | Min Tip | Cost | Key Trait |
+|---------|------|---------|------|-----------|
+| **Jito** | Bundle (gRPC) | 10,000 lamports | Per tip | Atomic bundle, fail = no cost, baseline |
+| **Flashblock** | SWQoS (Stream) | 0.0001 SOL | Free 10 TPS | Low cost SWQoS, good for high-frequency |
+| **Astralane** | SWQoS | 0.00001 SOL | — | Lowest tip, SWQoS channel |
+
+**Why these three:**
+
+- **Jito**: Industry standard, atomic bundle guarantee (revert = no landing = zero cost). Must-have baseline.
+- **Flashblock**: Free tier (10 TPS), SWQoS weight for better landing priority. Best cost-efficiency for arbitrage. Community: "套利 swqos 好像只有 flashblock、Astralane 这两家可以吧"
+- **Astralane**: Lowest minimum tip (0.00001 SOL), dedicated SWQoS channel. Complements Flashblock for maximum SWQoS coverage.
+
+**Excluded channels:**
+- 0slot: High minimum tip (0.001 SOL for new accounts), no revert protection, suspected self-sandwich
+- bloXroute: $1,250+/month subscription, overkill for initial deployment
+- NextBlock: $999+/month, unreliable anti-MEV ("用 nextblock 上鏈還會被夾")
+- Temporal/Nozomi: No revert protection, high minimum tip
+
+### 6.3 Opportunity Structure
 
 ```rust
 struct Opportunity {
@@ -596,7 +739,7 @@ struct Opportunity {
 }
 ```
 
-### 6.2 Execution Flow
+### 6.4 Execution Flow
 
 ```
 Opportunity received
@@ -613,26 +756,148 @@ Opportunity received
    - If NeedsEphemeral: queue Tier 3 creation, skip this opportunity
     │
     ▼
-3. tx_builder: assemble V0 transaction (~0.05 ms)
+3. tx_builder: assemble transaction (~0.05 ms)
    - Select instruction (4/5/6 by hop_count)
    - Pack instruction data (<=24 bytes)
    - Arrange header accounts + pool accounts
    - Compile with selected ALTs (Message::try_compile with address_lookup_tables)
-   - Set compute budget (dynamic by hop_count)
+   - Set compute budget: CU limit (jittered) + CU price (for non-Jito channels)
+   - Build TWO transaction variants:
+     a. Jito bundle tx (tip instruction appended, no CU price needed)
+     b. SWQoS tx (CU price set, no separate tip instruction)
     │
     ▼
-4. jito: send Bundle (~5-10 ms)
-   - Build Jito bundle (1 transaction + tip)
-   - Submit to Jito block engine gRPC
-   - Bundle failure = not landed = zero cost
+4. multi_sender: parallel submission (~5-10 ms)
+   - Fire all enabled channels concurrently (tokio::join!)
+   - Each channel sends independently, first-landed wins
+   - Track which channel landed for metrics
     │
     ▼
-5. Result tracking + metrics
+5. Result tracking + per-channel metrics
 ```
 
-### 6.3 Jito Bundle Sender
+### 6.5 Transaction Variants
+
+Jito bundles and SWQoS channels require different transaction formats:
 
 ```rust
+struct TxVariants {
+    /// Jito: bundle with separate tip transfer instruction, no ComputeUnitPrice
+    jito_bundle_tx: VersionedTransaction,
+    /// SWQoS (Flashblock/Astralane): ComputeUnitPrice set, tip embedded as priority fee
+    swqos_tx: VersionedTransaction,
+}
+
+impl TxBuilder {
+    fn build_variants(&self, opp: &Opportunity, blockhash: Hash) -> TxVariants {
+        let base_ixs = self.build_arb_instructions(opp);
+
+        // Jito variant: append tip transfer, no CU price
+        let jito_ixs = [
+            vec![ComputeBudgetInstruction::set_compute_unit_limit(self.jittered_cu(opp))],
+            base_ixs.clone(),
+            vec![self.jito_tip_ix(opp)],
+        ].concat();
+
+        // SWQoS variant: set CU price, no separate tip
+        let swqos_ixs = [
+            vec![
+                ComputeBudgetInstruction::set_compute_unit_limit(self.jittered_cu(opp)),
+                ComputeBudgetInstruction::set_compute_unit_price(self.compute_cu_price(opp)),
+            ],
+            base_ixs,
+        ].concat();
+
+        TxVariants {
+            jito_bundle_tx: self.compile_v0(jito_ixs, blockhash),
+            swqos_tx: self.compile_v0(swqos_ixs, blockhash),
+        }
+    }
+
+    /// CU price for SWQoS channels (micro-lamports per CU)
+    /// Higher price = higher priority in validator's scheduler
+    fn compute_cu_price(&self, opp: &Opportunity) -> u64 {
+        // Allocate ~30% of expected profit as priority fee
+        let fee_budget = opp.expected_profit * 30 / 100;
+        let cu_estimate = self.estimate_cu(opp);
+        // Convert lamports to micro-lamports per CU
+        (fee_budget * 1_000_000) / cu_estimate
+    }
+}
+```
+
+### 6.6 Multi-Channel Sender
+
+```rust
+// executor/multi_sender.rs
+
+/// Trait for all submission channels
+#[async_trait]
+trait SubmitChannel: Send + Sync {
+    fn name(&self) -> &'static str;
+    fn is_enabled(&self) -> bool;
+    async fn submit(&self, tx: &VersionedTransaction) -> Result<SubmitResult>;
+}
+
+struct MultiSender {
+    channels: Vec<Box<dyn SubmitChannel>>,
+    metrics: Arc<Metrics>,
+}
+
+impl MultiSender {
+    fn new(config: &Config, keypair: Arc<Keypair>) -> Self {
+        let mut channels: Vec<Box<dyn SubmitChannel>> = Vec::new();
+
+        if config.jito.enabled {
+            channels.push(Box::new(JitoSender::new(&config.jito, keypair.clone())));
+        }
+        if config.flashblock.enabled {
+            channels.push(Box::new(FlashblockSender::new(&config.flashblock, keypair.clone())));
+        }
+        if config.astralane.enabled {
+            channels.push(Box::new(AstralaneSender::new(&config.astralane, keypair.clone())));
+        }
+
+        Self { channels, metrics: Arc::new(Metrics::default()) }
+    }
+
+    async fn submit(&self, variants: &TxVariants) {
+        let futures: Vec<_> = self.channels.iter()
+            .filter(|ch| ch.is_enabled())
+            .map(|ch| {
+                let tx = match ch.name() {
+                    "jito" => &variants.jito_bundle_tx,
+                    _ => &variants.swqos_tx,       // Flashblock, Astralane use SWQoS variant
+                };
+                let name = ch.name();
+                let metrics = self.metrics.clone();
+                async move {
+                    let start = Instant::now();
+                    match ch.submit(tx).await {
+                        Ok(result) => {
+                            metrics.channel_submit_ok(name, start.elapsed());
+                            tracing::debug!(channel = name, sig = %result.signature, "Submitted");
+                        }
+                        Err(e) => {
+                            metrics.channel_submit_err(name);
+                            tracing::warn!(channel = name, err = %e, "Submit failed");
+                        }
+                    }
+                }
+            })
+            .collect();
+
+        // Fire all channels concurrently
+        futures::future::join_all(futures).await;
+    }
+}
+```
+
+### 6.7 Jito Bundle Sender
+
+```rust
+// executor/jito.rs
+
 struct JitoSender {
     block_engine_url: String,
     tip_accounts: Vec<Pubkey>,           // 8 Jito tip accounts, randomly selected
@@ -647,9 +912,67 @@ impl JitoSender {
         tip.max(MIN_TIP).min(expected_profit - MIN_OPERATOR_PROFIT)
     }
 }
+
+#[async_trait]
+impl SubmitChannel for JitoSender {
+    fn name(&self) -> &'static str { "jito" }
+    fn is_enabled(&self) -> bool { true }
+
+    async fn submit(&self, tx: &VersionedTransaction) -> Result<SubmitResult> {
+        // Wrap in Jito bundle (single tx) and submit via gRPC
+        let bundle = self.build_bundle(tx)?;
+        self.send_bundle(bundle).await
+    }
+}
 ```
 
-### 6.4 End-to-End Latency
+### 6.8 Flashblock SWQoS Sender
+
+```rust
+// executor/flashblock.rs
+
+struct FlashblockSender {
+    endpoint: String,                     // Flashblock Stream endpoint
+    keypair: Arc<Keypair>,
+    rate_limiter: RateLimiter,           // Respect 10 TPS free tier limit
+}
+
+#[async_trait]
+impl SubmitChannel for FlashblockSender {
+    fn name(&self) -> &'static str { "flashblock" }
+    fn is_enabled(&self) -> bool { self.rate_limiter.check().is_ok() }
+
+    async fn submit(&self, tx: &VersionedTransaction) -> Result<SubmitResult> {
+        // Submit via Flashblock's sendTransaction endpoint
+        // Transaction already has CU price set for validator priority
+        self.send_transaction(tx).await
+    }
+}
+```
+
+### 6.9 Astralane SWQoS Sender
+
+```rust
+// executor/astralane.rs
+
+struct AstralaneSender {
+    endpoint: String,
+    keypair: Arc<Keypair>,
+}
+
+#[async_trait]
+impl SubmitChannel for AstralaneSender {
+    fn name(&self) -> &'static str { "astralane" }
+    fn is_enabled(&self) -> bool { true }
+
+    async fn submit(&self, tx: &VersionedTransaction) -> Result<SubmitResult> {
+        // Submit via Astralane's SWQoS endpoint
+        self.send_transaction(tx).await
+    }
+}
+```
+
+### 6.10 End-to-End Latency
 
 ```
 Event                              Cumulative
@@ -659,13 +982,15 @@ Parser decodes pool state          ~0.01 ms
 Scanner scans affected routes      ~0.05-0.25 ms
 Optimizer finds optimal amount     ~0.01 ms
 Staleness check                    ~0 ms
-tx_builder assembles               ~0.05 ms
-Jito bundle submission             ~5-10 ms
+tx_builder assembles (2 variants)  ~0.1 ms
+Multi-channel parallel submission  ~5-10 ms (network-bound)
 ────────────────────────────────────────────
 Total                              ~5-15 ms
 ```
 
-No `simulateTransaction` in production path. Jito bundle failure = no on-chain landing = zero cost. The on-chain `min_profit` atomic revert is the sole safety mechanism.
+All channels fire concurrently — the slowest channel determines total submission time, but landing depends on whichever reaches the leader first.
+
+No `simulateTransaction` in production path. Jito bundle failure = not landed = zero cost. SWQoS channel failure = transaction reverts on-chain (costs base fee but `min_profit` check prevents loss). The on-chain `min_profit` atomic revert is the sole safety mechanism.
 
 The `simulator.rs` module is retained for debug/test use only.
 
@@ -678,7 +1003,9 @@ The `simulator.rs` module is retained for debug/test use only.
 | Scenario | Response |
 |----------|----------|
 | gRPC disconnect | Auto-reconnect with exponential backoff; full re-fetch pool state on reconnect (prevent missed updates); rebuild route table |
-| Jito submission failure (network) | Do not retry same opportunity (state is stale); wait for next opportunity |
+| Single channel submission failure | Other channels may still land; do not retry (state is stale); wait for next opportunity |
+| All channels fail (network) | Log warning; do not retry same opportunity; wait for next opportunity |
+| SWQoS tx lands but reverts | On-chain `min_profit` check caught stale state; costs base fee (~5000 lamports); acceptable |
 | Pool parse failure | Log warning + skip pool; does not affect other pools or routes |
 | Route table too large (memory pressure) | Dynamically raise pruning thresholds; remove low-liquidity routes |
 | Scanner calculation panic | `catch_unwind` isolation; log + skip route; engine does not crash |
@@ -694,9 +1021,15 @@ struct Metrics {
 
     // Effectiveness
     opportunities_found: Counter,         // Opportunities discovered
-    bundles_sent: Counter,                // Bundles submitted
+    bundles_sent: Counter,                // Bundles submitted (across all channels)
     bundles_landed: Counter,              // Successfully landed
     total_profit_lamports: Counter,       // Cumulative profit
+
+    // Per-channel
+    channel_submits: HashMap<String, Counter>,   // Submissions per channel
+    channel_lands: HashMap<String, Counter>,     // Landings per channel
+    channel_latency: HashMap<String, Histogram>, // Submission latency per channel
+    swqos_reverts: Counter,              // SWQoS txs that landed but reverted
 
     // Health
     active_pools: Gauge,                  // Active pool count
@@ -1554,9 +1887,10 @@ Without anti-fingerprinting:
 With anti-fingerprinting:
   CU limit:      200,000-200,999       → 1,000 variants
   Fee collector:  3 rotation            → 3 variants
-  Tip account:    8 rotation            → 8 variants
+  Tip account:    8 rotation (Jito)     → 8 variants
   Vault:          2 rotation            → 2 variants
-  Combined signatures: 1000 × 3 × 8 × 2 = 48,000 unique patterns
+  Submit channel: 3 channels            → 3 variants (different tx formats)
+  Combined signatures: 1000 × 3 × 8 × 2 × 3 = 144,000 unique patterns
 ```
 
 ---
@@ -1886,10 +2220,22 @@ reconnect_delay_ms = 1000
 reconnect_max_backoff_ms = 30000
 
 [jito]
+enabled = true
 block_engine_url = "https://mainnet.block-engine.jito.wtf"
-tip_percentage = 60           # % of expected profit
+tip_percentage = 60           # % of expected profit as Jito tip
 min_tip_lamports = 1000
 min_operator_profit = 5000
+
+[flashblock]
+enabled = true
+endpoint = "https://api.flashblock.io"
+max_tps = 10                  # Free tier limit
+cu_price_percentage = 30      # % of expected profit as CU price
+
+[astralane]
+enabled = true
+endpoint = "https://api.astralane.io"
+min_tip_lamports = 10         # 0.00001 SOL, lowest in market
 
 [pruning]
 min_pool_reserve_lamports = 100_000_000   # 0.1 SOL
