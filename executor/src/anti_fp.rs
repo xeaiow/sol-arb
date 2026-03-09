@@ -1,22 +1,25 @@
 use rand::Rng;
 use solana_sdk::pubkey::Pubkey;
+use std::sync::LazyLock;
 
-/// Jito tip accounts (8 official addresses)
-pub const JITO_TIP_ACCOUNTS: [&str; 8] = [
-    "96gYZGLnJYVFmbjzopPSU6QiEV5fGqZNyN9nmNhvrZU5",
-    "HFqU5x63VTqvQss8hp11i4bVqkfRtQ7NmXwkiNPLz4xG",
-    "Cw8CFyM9FkoMi7K7Crf6HNQqf4uEMzpKw6QNghXLvLkY",
-    "ADaUMid9yfUytqMBgopwjb2DTLSLo4G9hp12gJZTm1Xw",
-    "DfXygSm4jCyNCybVYYK6DwvWqjKee8pbDmJGcLWNDXjh",
-    "ADuUkR4vqLUMWXxW9gh6D6L8pMSga2WWP4N4G2Cj6ixc",
-    "DttWaMuVvTiduZRnguLF7jNxTgiMBZ1hyAumKUiL6JR3",
-    "3AVi9Tg9Uo68tJfuvoKvqKNWKkC5wPdSSdeBnizKZ6jT",
-];
+/// Jito tip accounts — pre-parsed at startup
+static JITO_TIP_PUBKEYS: LazyLock<[Pubkey; 8]> = LazyLock::new(|| {
+    [
+        solana_sdk::pubkey!("96gYZGLnJYVFmbjzopPSU6QiEV5fGqZNyN9nmNhvrZU5"),
+        solana_sdk::pubkey!("HFqU5x63VTqvQss8hp11i4bVqkfRtQ7NmXwkiNPLz4xG"),
+        solana_sdk::pubkey!("Cw8CFyM9FkoMi7K7Crf6HNQqf4uEMzpKw6QNghXLvLkY"),
+        solana_sdk::pubkey!("ADaUMid9yfUytqMBgopwjb2DTLSLo4G9hp12gJZTm1Xw"),
+        solana_sdk::pubkey!("DfXygSm4jCyNCybVYYK6DwvWqjKee8pbDmJGcLWNDXjh"),
+        solana_sdk::pubkey!("ADuUkR4vqLUMWXxW9gh6D6L8pMSga2WWP4N4G2Cj6ixc"),
+        solana_sdk::pubkey!("DttWaMuVvTiduZRnguLF7jNxTgiMBZ1hyAumKUiL6JR3"),
+        solana_sdk::pubkey!("3AVi9Tg9Uo68tJfuvoKvqKNWKkC5wPdSSdeBnizKZ6jT"),
+    ]
+});
 
 pub fn random_tip_account() -> Pubkey {
     let mut rng = rand::thread_rng();
-    let idx = rng.gen_range(0..JITO_TIP_ACCOUNTS.len());
-    JITO_TIP_ACCOUNTS[idx].parse().unwrap()
+    let idx = rng.gen_range(0..8);
+    JITO_TIP_PUBKEYS[idx]
 }
 
 pub fn random_fee_collector(collectors: &[Pubkey]) -> Pubkey {

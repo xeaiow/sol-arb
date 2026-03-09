@@ -65,8 +65,8 @@ async fn main() -> anyhow::Result<()> {
     // Receives Opportunities, builds transactions, and sends them via
     // Jito bundles / Flashblock / direct RPC.
     let payer = Keypair::new(); // In production, load from file or env
-    let executor = Executor::new(executor_config, opp_rx, payer, &rpc_url);
-    println!("Stage 3 (Executor) initialized");
+    let executor = Executor::new(executor_config, opp_rx, payer, &rpc_url).await?;
+    println!("Stage 3 (Executor) initialized — all connections pre-established");
 
     // ── Run ─────────────────────────────────────────────────────────────
     println!("\nPipeline ready. Running all stages concurrently...");

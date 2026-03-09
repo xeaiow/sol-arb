@@ -15,12 +15,16 @@ pub struct MultiSender {
 }
 
 impl MultiSender {
-    pub fn from_config(config: &ExecutorConfigFile) -> Self {
+    pub async fn from_config(config: &ExecutorConfigFile) -> Self {
         let mut jito_senders = Vec::new();
         if let Some(jito_cfg) = &config.jito {
             if jito_cfg.enabled {
                 for url in &jito_cfg.block_engine_urls {
-                    jito_senders.push(jito::JitoSender::new(url.clone()));
+                    let mut sender = jito::JitoSender::new(url.clone());
+                    if let Err(e) = sender.connect().await {
+                        warn!("Failed to pre-connect Jito {}: {}", url, e);
+                    }
+                    jito_senders.push(sender);
                 }
             }
         }
