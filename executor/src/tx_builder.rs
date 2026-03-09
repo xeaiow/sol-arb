@@ -214,7 +214,14 @@ impl TxBuilder {
         if opp.pool_snapshots[hop_count as usize - 1].is_a_to_b {
             flags |= 1 << 1;
         }
-        // TODO: set token_2022 bits when needed
+        let buy = &opp.pool_snapshots[0];
+        if buy.mint_a_is_2022 || buy.mint_b_is_2022 {
+            flags |= 1 << 2;
+        }
+        let sell = &opp.pool_snapshots[hop_count as usize - 1];
+        if sell.mint_a_is_2022 || sell.mint_b_is_2022 {
+            flags |= 1 << 3;
+        }
         data.push(flags);
 
         // Middle hops (3-hop and 4-hop)
@@ -223,6 +230,10 @@ impl TxBuilder {
             let mut mid_flags: u8 = 0;
             if opp.pool_snapshots[i].is_a_to_b {
                 mid_flags |= 1;
+            }
+            let mid = &opp.pool_snapshots[i];
+            if mid.mint_a_is_2022 || mid.mint_b_is_2022 {
+                mid_flags |= 1 << 1;
             }
             data.push(mid_flags);
         }
@@ -256,13 +267,18 @@ impl TxBuilder {
         // Intermediate token accounts: 3 × (hop_count - 1)
         for i in 1..hop_count {
             let prev_snapshot = &opp.pool_snapshots[i - 1];
-            let intermediate_mint = if prev_snapshot.is_a_to_b {
-                prev_snapshot.mint_b
+            let (intermediate_mint, is_2022) = if prev_snapshot.is_a_to_b {
+                (prev_snapshot.mint_b, prev_snapshot.mint_b_is_2022)
             } else {
-                prev_snapshot.mint_a
+                (prev_snapshot.mint_a, prev_snapshot.mint_a_is_2022)
+            };
+            let token_program = if is_2022 {
+                TOKEN_2022_PROGRAM_ID
+            } else {
+                SPL_TOKEN_PROGRAM_ID
             };
             metas.push(AccountMeta::new_readonly(intermediate_mint, false));   // mint
-            metas.push(AccountMeta::new_readonly(SPL_TOKEN_PROGRAM_ID, false)); // token program
+            metas.push(AccountMeta::new_readonly(token_program, false));       // token program
             let intermediate_ata = derive_ata(&self.payer_pubkey, &intermediate_mint);
             metas.push(AccountMeta::new(intermediate_ata, false));             // user ATA
         }

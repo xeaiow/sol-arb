@@ -20,6 +20,8 @@ pub struct PoolEntry {
     pub dex_type: solana_streamer_sdk::pool::state::DexType,
     pub vault_a: Option<Pubkey>,
     pub vault_b: Option<Pubkey>,
+    pub mint_a_is_2022: bool,
+    pub mint_b_is_2022: bool,
     pub last_updated_slot: u64,
 }
 
@@ -33,6 +35,8 @@ impl PoolEntry {
             dex_type: state.dex_type,
             vault_a: state.vault_a,
             vault_b: state.vault_b,
+            mint_a_is_2022: state.mint_a_is_2022,
+            mint_b_is_2022: state.mint_b_is_2022,
             last_updated_slot: state.last_updated_slot,
         }
     }

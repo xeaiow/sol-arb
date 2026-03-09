@@ -21,6 +21,8 @@ pub struct PoolSnapshot {
     pub mint_a: Pubkey,
     pub mint_b: Pubkey,
     pub is_a_to_b: bool,
+    pub mint_a_is_2022: bool,
+    pub mint_b_is_2022: bool,
     pub accounts: Vec<Pubkey>,
 }
 

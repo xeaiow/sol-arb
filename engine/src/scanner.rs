@@ -74,6 +74,8 @@ impl Scanner {
             dex_type: update.dex_type,
             vault_a: None,
             vault_b: None,
+            mint_a_is_2022: false,
+            mint_b_is_2022: false,
             last_updated_slot: update.slot,
         };
 
@@ -189,6 +191,8 @@ impl Scanner {
                 mint_a: pool.mint_a,
                 mint_b: pool.mint_b,
                 is_a_to_b: hop.is_a_to_b,
+                mint_a_is_2022: pool.mint_a_is_2022,
+                mint_b_is_2022: pool.mint_b_is_2022,
                 accounts: vec![
                     pool.address,
                     pool.mint_a,
