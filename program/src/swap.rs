@@ -21,14 +21,13 @@ pub fn execute(
     // Read initial balance of user base token ATA
     let initial_balance = read_token_balance(&accounts[ACCT_USER_BASE_ATA])?;
 
-    if ix.use_flashloan {
-        let fl_start = HEADER_SIZE + (ix.hop_count as usize - 1) * INTERMEDIATE_ACCOUNTS_PER_TOKEN;
-        if fl_start + FLASHLOAN_ACCOUNT_COUNT > accounts.len() {
-            return Err(ProgramError::NotEnoughAccountKeys);
-        }
-        let fl_accounts = &accounts[fl_start..fl_start + FLASHLOAN_ACCOUNT_COUNT];
-        crate::flashloan::flash_borrow(fl_accounts, ix.amount_in)?;
-    }
+    let fl_accounts = if ix.use_flashloan {
+        let fl = flashloan_slice(accounts, ix.hop_count)?;
+        crate::flashloan::flash_borrow(fl, ix.amount_in)?;
+        Some(fl)
+    } else {
+        None
+    };
 
     // Execute each hop
     for i in 0..ix.hop_count {
@@ -48,13 +47,10 @@ pub fn execute(
         dispatch_swap(hop, &accounts[pool_start..pool_end])?;
     }
 
-    if ix.use_flashloan {
-        let fl_start = HEADER_SIZE + (ix.hop_count as usize - 1) * INTERMEDIATE_ACCOUNTS_PER_TOKEN;
-        if fl_start + FLASHLOAN_ACCOUNT_COUNT > accounts.len() {
-            return Err(ProgramError::NotEnoughAccountKeys);
-        }
-        let fl_accounts = &accounts[fl_start..fl_start + FLASHLOAN_ACCOUNT_COUNT];
-        crate::flashloan::flash_repay(fl_accounts, ix.amount_in)?;
+    if let Some(fl) = fl_accounts {
+        // MarginFi charges 0% fee, so repay == borrow amount.
+        // If MarginFi ever introduces a fee, update to amount_in + fee.
+        crate::flashloan::flash_repay(fl, ix.amount_in)?;
     }
 
     // Verify profit
@@ -68,6 +64,15 @@ pub fn execute(
     }
 
     Ok(())
+}
+
+/// Slice the flashloan accounts from the account array.
+fn flashloan_slice(accounts: &[AccountView], hop_count: u8) -> Result<&[AccountView], ProgramError> {
+    let fl_start = HEADER_SIZE + (hop_count as usize - 1) * INTERMEDIATE_ACCOUNTS_PER_TOKEN;
+    if fl_start + FLASHLOAN_ACCOUNT_COUNT > accounts.len() {
+        return Err(ProgramError::NotEnoughAccountKeys);
+    }
+    Ok(&accounts[fl_start..fl_start + FLASHLOAN_ACCOUNT_COUNT])
 }
 
 /// Read SPL token account balance at byte offset 64 (u64 LE).
