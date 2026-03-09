@@ -6,6 +6,7 @@ use pinocchio::{
 use crate::accounts::{
     SwapInstruction, HopInfo, DexType,
     ACCT_USER_BASE_ATA, pool_accounts_start,
+    HEADER_SIZE, INTERMEDIATE_ACCOUNTS_PER_TOKEN, FLASHLOAN_ACCOUNT_COUNT,
 };
 
 /// Execute a multi-hop swap with profit verification.
@@ -20,7 +21,11 @@ pub fn execute(
     // Read initial balance of user base token ATA
     let initial_balance = read_token_balance(&accounts[ACCT_USER_BASE_ATA])?;
 
-    // TODO: flashloan borrow (Task 4)
+    if ix.use_flashloan {
+        let fl_start = HEADER_SIZE + (ix.hop_count as usize - 1) * INTERMEDIATE_ACCOUNTS_PER_TOKEN;
+        let fl_accounts = &accounts[fl_start..fl_start + FLASHLOAN_ACCOUNT_COUNT];
+        crate::flashloan::flash_borrow(fl_accounts, ix.amount_in)?;
+    }
 
     // Execute each hop
     for i in 0..ix.hop_count {
@@ -40,7 +45,11 @@ pub fn execute(
         dispatch_swap(hop, &accounts[pool_start..pool_end])?;
     }
 
-    // TODO: flashloan repay (Task 4)
+    if ix.use_flashloan {
+        let fl_start = HEADER_SIZE + (ix.hop_count as usize - 1) * INTERMEDIATE_ACCOUNTS_PER_TOKEN;
+        let fl_accounts = &accounts[fl_start..fl_start + FLASHLOAN_ACCOUNT_COUNT];
+        crate::flashloan::flash_repay(fl_accounts, ix.amount_in)?;
+    }
 
     // Verify profit
     let final_balance = read_token_balance(&accounts[ACCT_USER_BASE_ATA])?;
