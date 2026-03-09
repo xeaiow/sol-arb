@@ -108,7 +108,9 @@ impl MultiSender {
         }
 
         for handle in handles {
-            let _ = handle.await;
+            if let Err(e) = handle.await {
+                warn!("Send task panicked: {}", e);
+            }
         }
     }
 }

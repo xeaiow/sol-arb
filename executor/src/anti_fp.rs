@@ -23,6 +23,10 @@ pub fn random_tip_account() -> Pubkey {
 }
 
 pub fn random_fee_collector(collectors: &[Pubkey]) -> Pubkey {
+    if collectors.is_empty() {
+        // Fallback: use first Jito tip account as fee collector
+        return JITO_TIP_PUBKEYS[0];
+    }
     let mut rng = rand::thread_rng();
     let idx = rng.gen_range(0..collectors.len());
     collectors[idx]

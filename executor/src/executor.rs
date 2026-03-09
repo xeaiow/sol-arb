@@ -85,7 +85,9 @@ impl Executor {
             .get_latest_blockhash()
             .await
             .expect("Failed to get initial blockhash");
-        let mut blockhash_age: u64 = 0;
+        let mut blockhash_slot: u64 = 0;
+        // Blockhash is valid for ~150 slots (~60s). Refresh every 100 slots for safety.
+        const BLOCKHASH_REFRESH_SLOTS: u64 = 100;
 
         loop {
             let opp = match self.opp_rx.recv().await {
@@ -106,13 +108,12 @@ impl Executor {
                 continue;
             }
 
-            // Refresh blockhash every ~50 opportunities
-            blockhash_age += 1;
-            if blockhash_age > 50 {
+            // Refresh blockhash based on slot distance (not counter)
+            if latest_slot.saturating_sub(blockhash_slot) >= BLOCKHASH_REFRESH_SLOTS {
                 match self.rpc.get_latest_blockhash().await {
                     Ok(bh) => {
                         recent_blockhash = bh;
-                        blockhash_age = 0;
+                        blockhash_slot = latest_slot;
                     }
                     Err(e) => {
                         warn!("Failed to refresh blockhash: {}", e);

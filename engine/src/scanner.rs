@@ -1,5 +1,6 @@
 use std::time::Instant;
-use log::{info, debug};
+use log::{info, debug, warn};
+use solana_sdk::pubkey::Pubkey;
 use tokio::sync::mpsc;
 
 use solana_streamer_sdk::pool::state::PoolUpdate;
@@ -72,10 +73,11 @@ impl Scanner {
             mint_b: update.mint_b,
             math: update.math,
             dex_type: update.dex_type,
-            vault_a: None,
-            vault_b: None,
-            mint_a_is_2022: false,
-            mint_b_is_2022: false,
+            vault_a: update.vault_a,
+            vault_b: update.vault_b,
+            mint_a_is_2022: update.mint_a_is_2022,
+            mint_b_is_2022: update.mint_b_is_2022,
+            extra_accounts: update.extra_accounts,
             last_updated_slot: update.slot,
         };
 
@@ -193,11 +195,7 @@ impl Scanner {
                 is_a_to_b: hop.is_a_to_b,
                 mint_a_is_2022: pool.mint_a_is_2022,
                 mint_b_is_2022: pool.mint_b_is_2022,
-                accounts: vec![
-                    pool.address,
-                    pool.mint_a,
-                    pool.mint_b,
-                ],
+                accounts: Self::build_pool_accounts(pool, hop.is_a_to_b),
             });
         }
 
@@ -209,7 +207,30 @@ impl Scanner {
             slot: max_slot,
         };
 
-        let _ = self.opportunity_tx.try_send(opportunity);
+        if let Err(e) = self.opportunity_tx.try_send(opportunity) {
+            warn!("Opportunity channel full, dropping: {}", e);
+        }
         true
+    }
+
+    /// Build the per-hop pool accounts list for a given pool.
+    /// These are the accounts that swap.rs receives as `pool_accounts`.
+    /// User-specific accounts (payer, user ATAs) and fixed program IDs are
+    /// filled in by TxBuilder — this only returns pool-specific accounts.
+    fn build_pool_accounts(pool: &PoolEntry, _is_a_to_b: bool) -> Vec<Pubkey> {
+        // For now, include: pool address + vaults + extra_accounts.
+        // The exact ordering per DEX will be refined when TxBuilder
+        // assembles the full transaction (it has access to the payer
+        // and can derive user ATAs, program IDs, etc.).
+        let mut accounts = Vec::with_capacity(4 + pool.extra_accounts.len());
+        accounts.push(pool.address);
+        if let Some(vault_a) = pool.vault_a {
+            accounts.push(vault_a);
+        }
+        if let Some(vault_b) = pool.vault_b {
+            accounts.push(vault_b);
+        }
+        accounts.extend_from_slice(&pool.extra_accounts);
+        accounts
     }
 }

@@ -110,6 +110,9 @@ impl TxBuilder {
         payer: &Keypair,
         recent_blockhash: Hash,
     ) -> TxPair {
+        let hop_count = opp.route.hops.len();
+        debug_assert!((2..=4).contains(&hop_count), "hop_count must be 2-4, got {}", hop_count);
+
         let dex_types: Vec<u8> = opp
             .pool_snapshots
             .iter()

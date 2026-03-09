@@ -22,6 +22,7 @@ pub struct PoolEntry {
     pub vault_b: Option<Pubkey>,
     pub mint_a_is_2022: bool,
     pub mint_b_is_2022: bool,
+    pub extra_accounts: Vec<Pubkey>,
     pub last_updated_slot: u64,
 }
 
@@ -37,6 +38,7 @@ impl PoolEntry {
             vault_b: state.vault_b,
             mint_a_is_2022: state.mint_a_is_2022,
             mint_b_is_2022: state.mint_b_is_2022,
+            extra_accounts: state.extra_accounts.clone(),
             last_updated_slot: state.last_updated_slot,
         }
     }
@@ -84,9 +86,24 @@ impl TokenGraph {
     pub fn add_pool(&mut self, entry: PoolEntry) -> u32 {
         // Skip if already added
         if let Some(&idx) = self.address_to_pool.get(&entry.address) {
-            // Update math
-            self.pools[idx as usize].math = entry.math;
-            self.pools[idx as usize].last_updated_slot = entry.last_updated_slot;
+            let existing = &mut self.pools[idx as usize];
+            existing.math = entry.math;
+            existing.last_updated_slot = entry.last_updated_slot;
+            if entry.vault_a.is_some() {
+                existing.vault_a = entry.vault_a;
+            }
+            if entry.vault_b.is_some() {
+                existing.vault_b = entry.vault_b;
+            }
+            if entry.mint_a_is_2022 {
+                existing.mint_a_is_2022 = true;
+            }
+            if entry.mint_b_is_2022 {
+                existing.mint_b_is_2022 = true;
+            }
+            if !entry.extra_accounts.is_empty() {
+                existing.extra_accounts = entry.extra_accounts;
+            }
             return idx;
         }
 
