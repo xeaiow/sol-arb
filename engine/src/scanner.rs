@@ -218,20 +218,46 @@ impl Scanner {
 
         // --- Evaluate remaining routes ---
         let mut opportunities = 0;
+        let mut probe_passed = 0;
+        let mut pool_not_ready = 0;
         let routes: Vec<Route> = self.route_table.routes.clone();
 
         for route in &routes {
+            // Quick probe inline to count stats
+            let probe_profit = optimizer::simulate_route_profit(
+                route,
+                &self.graph,
+                self.config.probe_amount_lamports,
+            );
+            if probe_profit > 0 {
+                probe_passed += 1;
+            }
             if self.evaluate_route(route, 0) {
                 opportunities += 1;
             }
         }
 
+        // Count pools by type and CLMM readiness
+        let mut clmm_ready = 0usize;
+        let mut clmm_not_ready = 0usize;
+        for pool in &self.graph.pools {
+            if pool.dex_type == DexType::RaydiumClmm {
+                if let PoolMath::Concentrated { tick_arrays, .. } = &pool.math {
+                    if tick_arrays.is_empty() { clmm_not_ready += 1; } else { clmm_ready += 1; }
+                }
+            }
+        }
+
         let elapsed = start.elapsed();
-        debug!(
-            "Full scan: {} routes in {:?}, {} opportunities",
-            self.route_table.route_count(),
-            elapsed,
+        info!(
+            "Full scan: {} routes, {} probe+, {} opps in {:?} | CLMM: {}/{} ready | pools: {}",
+            routes.len(),
+            probe_passed,
             opportunities,
+            elapsed,
+            clmm_ready,
+            clmm_ready + clmm_not_ready,
+            self.graph.pool_count(),
         );
     }
 
