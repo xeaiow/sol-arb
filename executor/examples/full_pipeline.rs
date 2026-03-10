@@ -27,6 +27,8 @@ use solana_streamer_sdk::streaming::yellowstone_grpc::{
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
+    eprintln!("Starting full_pipeline...");
+
     // ── Load config ──────────────────────────────────────────────────────
     let config_path = std::env::var("CONFIG_PATH")
         .unwrap_or_else(|_| "config.toml".to_string());
@@ -41,7 +43,7 @@ async fn main() -> anyhow::Result<()> {
     }
     env_logger::init();
 
-    println!("Config loaded: {}", config_path);
+    eprintln!("Config loaded: {}", config_path);
 
     // ── Resolve general settings (config -> env -> defaults) ─────────────
     let general = executor_config.general.as_ref();
@@ -71,10 +73,10 @@ async fn main() -> anyhow::Result<()> {
 
     let payer = read_keypair_file(&keypair_path)
         .map_err(|e| anyhow::anyhow!("Failed to read keypair {}: {}", keypair_path, e))?;
-    println!("Payer: {}", solana_sdk::signer::Signer::pubkey(&payer));
+    eprintln!("Payer: {}", solana_sdk::signer::Signer::pubkey(&payer));
 
     let engine_config = executor_config.engine_config();
-    println!(
+    eprintln!(
         "Engine: max_hops={}, min_profit={} lamports",
         engine_config.max_hops, engine_config.min_profit_lamports,
     );
@@ -86,15 +88,15 @@ async fn main() -> anyhow::Result<()> {
     };
     let (pool_streamer, update_rx) = PoolStreamer::new(streamer_config);
     let pool_streamer = Arc::new(pool_streamer);
-    println!("Stage 1 (PoolStreamer) ready");
+    eprintln!("Stage 1 (PoolStreamer) ready");
 
     // ── Stage 2: Engine ─────────────────────────────────────────────────
     let (engine, opp_rx) = Engine::new(engine_config, update_rx);
-    println!("Stage 2 (Engine) ready");
+    eprintln!("Stage 2 (Engine) ready");
 
     // ── Stage 3: Executor ───────────────────────────────────────────────
     let executor = Executor::new(executor_config, opp_rx, payer, &rpc_url).await?;
-    println!("Stage 3 (Executor) ready");
+    eprintln!("Stage 3 (Executor) ready");
 
     // ── Start gRPC subscription ─────────────────────────────────────────
     let grpc = Arc::new(YellowstoneGrpc::new(grpc_endpoint, grpc_token)?);
@@ -149,19 +151,32 @@ async fn main() -> anyhow::Result<()> {
     )
     .await?;
 
-    println!("\n=== Pipeline running. Warming up... ===");
-    println!("(Press Ctrl-C to stop)\n");
+    eprintln!("\n=== Pipeline running. Warming up... ===");
+    eprintln!("(Press Ctrl-C to stop)\n");
+
+    // ── Vault balance fetcher: batch RPC every 2 seconds ──
+    let vault_streamer = pool_streamer.clone();
+    let vault_fetcher = async move {
+        let mut interval = tokio::time::interval(std::time::Duration::from_secs(2));
+        loop {
+            interval.tick().await;
+            vault_streamer.flush_pending_vaults().await;
+        }
+    };
 
     // ── Run all stages concurrently ─────────────────────────────────────
     tokio::select! {
         _ = engine.run() => {
-            println!("Engine exited");
+            eprintln!("Engine exited");
         }
         _ = executor.run() => {
-            println!("Executor exited");
+            eprintln!("Executor exited");
+        }
+        _ = vault_fetcher => {
+            eprintln!("Vault fetcher exited");
         }
         _ = tokio::signal::ctrl_c() => {
-            println!("\nShutting down...");
+            eprintln!("\nShutting down...");
         }
     }
 

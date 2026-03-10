@@ -8,6 +8,7 @@ use tokio::task::JoinHandle;
 use crate::config::ExecutorConfigFile;
 use crate::tx_builder::TxPair;
 
+#[derive(Clone)]
 pub struct MultiSender {
     jito_senders: Vec<jito::JitoSender>,
     flashblock_senders: Vec<flashblock::FlashblockSender>,

@@ -125,13 +125,28 @@ impl Executor {
 
             let pair = self.tx_builder.build(&opp, &self.payer, recent_blockhash);
 
-            debug!(
-                "Opportunity: {} hops, profit={} lamports, submitting...",
-                opp.route.hops.len(),
-                opp.expected_profit,
-            );
+            {
+                let path: Vec<String> = opp.pool_snapshots.iter().map(|s| {
+                    let dir = if s.is_a_to_b { "→" } else { "←" };
+                    format!("{:?}({:.4}..{}{})", s.dex_type,
+                        &s.address.to_string()[..6], dir,
+                        &s.mint_b.to_string()[..6])
+                }).collect();
+                info!(
+                    "💰 Opp: {} hops, in={:.6} SOL, profit={:.6} SOL, slot={} | {}",
+                    opp.route.hops.len(),
+                    opp.amount_in as f64 / 1e9,
+                    opp.expected_profit as f64 / 1e9,
+                    opp.slot,
+                    path.join(" → "),
+                );
+            }
 
-            self.multi_sender.send_all(&pair).await;
+            // Fire-and-forget: don't block the loop waiting for network responses
+            let sender = self.multi_sender.clone();
+            tokio::spawn(async move {
+                sender.send_all(&pair).await;
+            });
         }
     }
 }

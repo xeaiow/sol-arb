@@ -87,14 +87,14 @@ enabled = false
 api_key = ""                    # Astralane API 金鑰
 cu_price_percentage = 30        # 利潤中分配給 CU 價格的百分比
 endpoints = [
-    "https://fr.gateway.astralane.io/iris",
-    "https://fr2.gateway.astralane.io/iris",
-    "https://ams.gateway.astralane.io/iris",
-    "https://ams2.gateway.astralane.io/iris",
-    "https://la.gateway.astralane.io/iris",
-    "https://ny.gateway.astralane.io/iris",
-    "https://jp.gateway.astralane.io/iris",
-    "https://sg.gateway.astralane.io/iris",
-    "https://lim.gateway.astralane.io/iris",
-    "https://lit.gateway.astralane.io/iris",
+    "https://fr.gateway.astralane.io/iris2",
+    "https://fr2.gateway.astralane.io/iris2",
+    "https://ams.gateway.astralane.io/iris2",
+    "https://ams2.gateway.astralane.io/iris2",
+    "https://la.gateway.astralane.io/iris2",
+    "https://ny.gateway.astralane.io/iris2",
+    "https://jp.gateway.astralane.io/iris2",
+    "https://sg.gateway.astralane.io/iris2",
+    "https://lim.gateway.astralane.io/iris2",
+    "https://lit.gateway.astralane.io/iris2",
 ]

@@ -22,19 +22,16 @@ impl AstralaneSender {
         let tx_bytes = bincode::serialize(tx)?;
         let tx_base64 = base64::engine::general_purpose::STANDARD.encode(&tx_bytes);
 
-        let body = serde_json::json!({
-            "jsonrpc": "2.0",
-            "id": 1,
-            "method": "sendTransaction",
-            "params": [tx_base64, {"encoding": "base64"}]
-        });
+        let url = format!(
+            "{}?api-key={}&method=sendTransaction",
+            self.endpoint, self.api_key,
+        );
 
         let resp = self
             .client
-            .post(&self.endpoint)
-            .header("Authorization", format!("Bearer {}", self.api_key))
-            .header("Content-Type", "application/json")
-            .json(&body)
+            .post(&url)
+            .header("Content-Type", "text/plain")
+            .body(tx_base64)
             .send()
             .await?;
 
@@ -44,7 +41,7 @@ impl AstralaneSender {
             anyhow::bail!("Astralane HTTP {}: {}", status, text);
         }
 
-        log::debug!("Astralane sent to {}", self.endpoint);
+        log::info!("Astralane sent OK: {}", self.endpoint);
         Ok(())
     }
 }

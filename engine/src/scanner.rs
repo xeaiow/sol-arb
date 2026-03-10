@@ -1,5 +1,6 @@
+use std::collections::HashMap;
 use std::time::Instant;
-use log::{info, debug, warn};
+use log::{info, debug};
 use solana_sdk::pubkey::Pubkey;
 use tokio::sync::mpsc;
 
@@ -17,6 +18,17 @@ enum Phase {
     Running,
 }
 
+/// A compact key for deduplicating routes (up to 4 hops)
+type RouteKey = ([u32; 4], u8); // (pool_indices, hop_count)
+
+fn route_key(route: &Route) -> RouteKey {
+    let mut pools = [0u32; 4];
+    for (i, hop) in route.hops.iter().enumerate() {
+        pools[i] = hop.pool_index;
+    }
+    (pools, route.hops.len() as u8)
+}
+
 /// The main scanner that ties everything together
 pub struct Scanner {
     config: EngineConfig,
@@ -25,6 +37,8 @@ pub struct Scanner {
     phase: Phase,
     update_rx: mpsc::Receiver<PoolUpdate>,
     opportunity_tx: mpsc::Sender<Opportunity>,
+    /// Dedup: route_key -> (slot, profit) of last emitted opportunity
+    recent_emissions: HashMap<RouteKey, (u64, u64)>,
 }
 
 impl Scanner {
@@ -40,6 +54,7 @@ impl Scanner {
             phase: Phase::Warmup { start: Instant::now() },
             update_rx,
             opportunity_tx,
+            recent_emissions: HashMap::new(),
         }
     }
 
@@ -82,6 +97,15 @@ impl Scanner {
         };
 
         let is_new = !self.graph.address_to_pool.contains_key(&update.pool_address);
+
+        // Check if pool previously failed min_reserve check (before upsert)
+        let had_min_reserve = if !is_new {
+            let idx = self.graph.address_to_pool[&update.pool_address];
+            self.graph.pool_has_min_reserve(idx, self.config.min_reserve_lamports)
+        } else {
+            false
+        };
+
         let pool_index = self.graph.add_pool(entry);
 
         match &self.phase {
@@ -109,11 +133,30 @@ impl Scanner {
             Phase::Running => {
                 if is_new {
                     // New pool: incrementally add routes
+                    let before = self.route_table.route_count();
                     self.route_table.add_routes_for_pool(
                         &self.graph,
                         &self.config,
                         pool_index,
                     );
+                    let after = self.route_table.route_count();
+                    if after > before {
+                        info!("New pool {} added {} routes (total {})",
+                            update.pool_address, after - before, after);
+                    }
+                } else if !had_min_reserve
+                    && self.graph.pool_has_min_reserve(pool_index, self.config.min_reserve_lamports)
+                {
+                    // Reserve just became valid: build routes for this pool
+                    let before = self.route_table.route_count();
+                    self.route_table.add_routes_for_pool(
+                        &self.graph,
+                        &self.config,
+                        pool_index,
+                    );
+                    let after = self.route_table.route_count();
+                    info!("Pool {} reserve activated, added {} routes (total {})",
+                        update.pool_address, after - before, after);
                 }
 
                 // Incremental scan: only routes affected by this pool
@@ -123,12 +166,14 @@ impl Scanner {
     }
 
     /// Scan routes affected by a specific pool update
-    fn scan_routes_for_pool(&self, pool_index: u32, slot: u64) {
+    fn scan_routes_for_pool(&mut self, pool_index: u32, slot: u64) {
         let route_indices = self.route_table.index.routes_for_pool(pool_index);
+        // Collect indices to avoid borrow conflict
+        let indices: Vec<u32> = route_indices.to_vec();
 
-        for &route_idx in route_indices {
-            let route = &self.route_table.routes[route_idx as usize];
-            self.evaluate_route(route, slot);
+        for route_idx in indices {
+            let route = self.route_table.routes[route_idx as usize].clone();
+            self.evaluate_route(&route, slot);
         }
     }
 
@@ -140,7 +185,10 @@ impl Scanner {
         let pool_count = self.graph.pool_count();
         let mut dead_pools: Vec<u32> = Vec::new();
         for i in 0..pool_count {
-            if self.graph.is_pool_dead(i as u32) {
+            let pool = &self.graph.pools[i];
+            // Only prune pools that have received at least one update (last_updated_slot > 0).
+            // Newly registered pools may have reserve=0 because vault balance hasn't arrived yet.
+            if pool.last_updated_slot > 0 && self.graph.is_pool_dead(i as u32) {
                 dead_pools.push(i as u32);
             }
         }
@@ -164,21 +212,14 @@ impl Scanner {
             );
         }
 
-        // --- Backpressure check ---
-        let capacity = self.opportunity_tx.capacity();
-        let max_capacity = self.opportunity_tx.max_capacity();
-        if capacity < max_capacity / 4 {
-            debug!(
-                "Full scan skipped: channel {}/{} capacity, executor behind",
-                capacity, max_capacity,
-            );
-            return;
-        }
+        // --- Clear dedup map each full scan (allow re-evaluation) ---
+        self.recent_emissions.clear();
 
         // --- Evaluate remaining routes ---
         let mut opportunities = 0;
+        let routes: Vec<Route> = self.route_table.routes.clone();
 
-        for route in &self.route_table.routes {
+        for route in &routes {
             if self.evaluate_route(route, 0) {
                 opportunities += 1;
             }
@@ -194,7 +235,7 @@ impl Scanner {
     }
 
     /// Evaluate a single route. Returns true if an Opportunity was emitted.
-    fn evaluate_route(&self, route: &Route, slot: u64) -> bool {
+    fn evaluate_route(&mut self, route: &Route, slot: u64) -> bool {
         // Quick probe
         let probe_profit = optimizer::simulate_route_profit(
             route,
@@ -217,6 +258,15 @@ impl Scanner {
 
         if profit < self.config.min_profit_lamports {
             return false;
+        }
+
+        // --- Dedup: skip if same route was recently emitted with >= profit ---
+        let key = route_key(route);
+        if let Some(&(prev_slot, prev_profit)) = self.recent_emissions.get(&key) {
+            // Same slot or next slot: only re-emit if profit increased by >10%
+            if slot <= prev_slot + 1 && profit <= prev_profit + prev_profit / 10 {
+                return false;
+            }
         }
 
         // Build opportunity with pool snapshots
@@ -248,10 +298,13 @@ impl Scanner {
             slot: max_slot,
         };
 
-        if let Err(e) = self.opportunity_tx.try_send(opportunity) {
-            warn!("Opportunity channel full, dropping: {}", e);
+        if self.opportunity_tx.try_send(opportunity).is_ok() {
+            self.recent_emissions.insert(key, (max_slot, profit));
+            true
+        } else {
+            debug!("Opportunity channel full, dropping");
+            false
         }
-        true
     }
 
     /// Build the per-hop pool accounts list for a given pool.
