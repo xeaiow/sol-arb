@@ -51,13 +51,13 @@ impl Executor {
 
         // Pre-initialize MarginFi state (if flashloan enabled)
         let marginfi_state = if config.executor.flashloan_enabled {
-            match MarginFiState::init(&rpc, &payer_pubkey).await {
-                Ok(state) => Some(Arc::new(state)),
-                Err(e) => {
-                    warn!("Failed to init MarginFi: {} — flashloan disabled", e);
-                    None
-                }
-            }
+            let state = MarginFiState::init(&rpc, &payer_pubkey)
+                .await
+                .map_err(|e| anyhow::anyhow!(
+                    "flashloan_enabled=true but MarginFi init failed: {}. \
+                     Set flashloan_enabled=false or fix the issue.", e
+                ))?;
+            Some(Arc::new(state))
         } else {
             None
         };

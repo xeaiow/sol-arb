@@ -20,7 +20,6 @@ pub struct ExecutorConfig {
 pub struct AntiFingerprint {
     pub cu_jitter_range: u32,
     pub fee_collectors_sol: Vec<String>,
-    pub fee_collector_usdc: String,
 }
 
 #[derive(Debug, Deserialize)]
