@@ -148,6 +148,14 @@ impl Executor {
                 );
             }
 
+            // Test mode: send and wait, then exit
+            if self.tx_builder.test_mode {
+                let sender = self.multi_sender.clone();
+                sender.send_all(&pair).await;
+                info!("Test mode: first opportunity sent, exiting.");
+                break;
+            }
+
             // Fire-and-forget: don't block the loop waiting for network responses
             let sender = self.multi_sender.clone();
             tokio::spawn(async move {
