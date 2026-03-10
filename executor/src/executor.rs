@@ -36,6 +36,7 @@ impl Executor {
         let mut tx_builder = TxBuilder::from_config(&config, payer_pubkey);
 
         // Pre-load ALT
+        info!("Loading ALT...");
         let alt_address = config.executor.alt_address.parse()?;
         match Tier0Alt::load(&rpc, alt_address).await {
             Ok(alt) => {
@@ -46,7 +47,8 @@ impl Executor {
             }
         }
 
-        // Pre-connect all senders (Jito gRPC, reqwest clients)
+        // Pre-connect all senders (Jito gRPC, reqwest clients) — non-blocking
+        info!("Connecting to senders...");
         let multi_sender = MultiSender::from_config(&config).await;
 
         // Pre-initialize MarginFi state (if flashloan enabled)

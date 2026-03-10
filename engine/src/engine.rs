@@ -18,7 +18,7 @@ impl Engine {
         config: EngineConfig,
         update_rx: mpsc::Receiver<PoolUpdate>,
     ) -> (Self, mpsc::Receiver<Opportunity>) {
-        let (opp_tx, opp_rx) = mpsc::channel(256);
+        let (opp_tx, opp_rx) = mpsc::channel(4096);
         let scanner = Scanner::new(config, update_rx, opp_tx);
         (Self { scanner }, opp_rx)
     }

@@ -1,19 +1,13 @@
 //! Full pipeline: Stage 1 (PoolStreamer) -> Stage 2 (Engine) -> Stage 3 (Executor)
 //!
 //! Usage:
-//!   CONFIG_PATH=executor/config.toml KEYPAIR_PATH=~/.config/solana/id.json \
-//!     RUST_LOG=info cargo run --example full_pipeline
+//!   RUST_LOG=info cargo run --release --example full_pipeline
 //!
-//! Environment variables:
-//!   CONFIG_PATH   - path to executor config.toml (default: executor/config.toml)
-//!   KEYPAIR_PATH  - path to payer keypair JSON (default: ~/.config/solana/id.json)
-//!   RPC_URL       - Solana RPC endpoint (default: https://api.mainnet-beta.solana.com)
-//!   GRPC_ENDPOINT - Yellowstone gRPC endpoint (default: https://solana-yellowstone-grpc.publicnode.com:443)
-//!   GRPC_TOKEN    - optional gRPC auth token
+//! All settings are read from config.toml (default: config.toml).
+//! Override config path: CONFIG_PATH=path/to/config.toml
 
 use std::sync::Arc;
 
-use arb_engine::config::EngineConfig;
 use arb_engine::engine::Engine;
 use arb_executor::config::ExecutorConfigFile;
 use arb_executor::executor::Executor;
@@ -33,30 +27,53 @@ use solana_streamer_sdk::streaming::yellowstone_grpc::{
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
+    // ── Load config ──────────────────────────────────────────────────────
+    let config_path = std::env::var("CONFIG_PATH")
+        .unwrap_or_else(|_| "config.toml".to_string());
+    let executor_config = ExecutorConfigFile::load(&config_path)?;
+
+    // 從 config 設定 log level (若環境變數未設定)
+    if std::env::var("RUST_LOG").is_err() {
+        let level = executor_config.general.as_ref()
+            .and_then(|g| g.log_level.clone())
+            .unwrap_or_else(|| "info".to_string());
+        std::env::set_var("RUST_LOG", &level);
+    }
     env_logger::init();
 
-    // ── Configuration ───────────────────────────────────────────────────
-    let config_path = std::env::var("CONFIG_PATH")
-        .unwrap_or_else(|_| "executor/config.toml".to_string());
-    let rpc_url = std::env::var("RPC_URL")
-        .unwrap_or_else(|_| "https://api.mainnet-beta.solana.com".to_string());
-    let grpc_endpoint = std::env::var("GRPC_ENDPOINT")
-        .unwrap_or_else(|_| "https://solana-yellowstone-grpc.publicnode.com:443".to_string());
-    let grpc_token = std::env::var("GRPC_TOKEN").ok();
-
-    let keypair_path = std::env::var("KEYPAIR_PATH").unwrap_or_else(|_| {
-        let home = std::env::var("HOME").unwrap_or_else(|_| ".".to_string());
-        format!("{}/.config/solana/id.json", home)
-    });
-
-    let executor_config = ExecutorConfigFile::load(&config_path)?;
     println!("Config loaded: {}", config_path);
+
+    // ── Resolve general settings (config -> env -> defaults) ─────────────
+    let general = executor_config.general.as_ref();
+
+    let keypair_path = general.and_then(|g| g.keypair_path.clone())
+        .or_else(|| std::env::var("KEYPAIR_PATH").ok())
+        .unwrap_or_else(|| "~/.config/solana/id.json".to_string());
+    // 展開 ~ 為 $HOME
+    let keypair_path = if keypair_path.starts_with("~/") {
+        let home = std::env::var("HOME").unwrap_or_else(|_| ".".to_string());
+        format!("{}{}", home, &keypair_path[1..])
+    } else {
+        keypair_path
+    };
+
+    let rpc_url = general.and_then(|g| g.rpc_url.clone())
+        .or_else(|| std::env::var("RPC_URL").ok())
+        .unwrap_or_else(|| "https://api.mainnet-beta.solana.com".to_string());
+
+    let grpc_endpoint = general.and_then(|g| g.grpc_endpoint.clone())
+        .or_else(|| std::env::var("GRPC_ENDPOINT").ok())
+        .unwrap_or_else(|| "https://solana-yellowstone-grpc.publicnode.com:443".to_string());
+
+    let grpc_token = general.and_then(|g| g.grpc_token.clone())
+        .or_else(|| std::env::var("GRPC_TOKEN").ok())
+        .filter(|s| !s.is_empty());
 
     let payer = read_keypair_file(&keypair_path)
         .map_err(|e| anyhow::anyhow!("Failed to read keypair {}: {}", keypair_path, e))?;
     println!("Payer: {}", solana_sdk::signer::Signer::pubkey(&payer));
 
-    let engine_config = EngineConfig::default();
+    let engine_config = executor_config.engine_config();
     println!(
         "Engine: max_hops={}, min_profit={} lamports",
         engine_config.max_hops, engine_config.min_profit_lamports,

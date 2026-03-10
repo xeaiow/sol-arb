@@ -1,0 +1,100 @@
+# ═══════════════════════════════════════════════════════════════════════════════
+# 通用設定
+# keypair_path 和 rpc_url 為必填，其餘可選。
+# 也可透過同名環境變數覆蓋 (KEYPAIR_PATH, RPC_URL, GRPC_ENDPOINT, GRPC_TOKEN)。
+# ═══════════════════════════════════════════════════════════════════════════════
+[general]
+keypair_path = "~/.config/solana/id.json"       # 付款者 keypair JSON 檔案路徑
+rpc_url = "https://api.mainnet-beta.solana.com"  # Solana RPC 端點
+grpc_endpoint = "https://solana-yellowstone-grpc.publicnode.com:443"  # Yellowstone gRPC 端點
+grpc_token = ""                                  # gRPC 認證 token (視供應商而定)
+log_level = "info"                               # 日誌等級 (error, warn, info, debug, trace)
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# 引擎設定
+# 所有欄位皆為選填，未設定則使用下方顯示的預設值。
+# ═══════════════════════════════════════════════════════════════════════════════
+[engine]
+max_hops = 4                    # 每條路由最大跳數 (2-4)
+warmup_secs = 30                # 暖機階段持續秒數
+warmup_pool_count = 1000        # 累積池子數達此值可提前結束暖機
+full_scan_interval_secs = 5     # 全路由掃描間隔 (秒)
+min_reserve_sol = 10.0          # 池子最低儲備量，低於此值忽略 (SOL)
+max_hop_fee = 0.02              # 單跳最高手續費比例 (0.0-1.0)
+min_profit_sol = 0.001          # 最低利潤門檻，低於此值不送出機會 (SOL)
+max_input_sol = 100.0           # 三元搜尋最大輸入量 (SOL)
+ternary_iterations = 10         # 三元搜尋迭代次數，越高越精確但越慢
+probe_amount_sol = 1.0          # 快速探測金額，用於初步篩除無利可圖的路由 (SOL)
+# base_mints = [                # 環路偵測的基礎代幣 (預設: WSOL, USDC, USD1)
+#     "So11111111111111111111111111111111111111112",
+#     "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v",
+#     "Ue2JCRrno2aAWT7gmjEwpsK5HQGM1ZMqSDZvMNo3S5e",
+# ]
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# 執行器設定
+# ═══════════════════════════════════════════════════════════════════════════════
+[executor]
+flashloan_enabled = false       # 是否啟用 MarginFi 閃電貸模式
+program_id = ""                 # 已部署的套利程式地址
+alt_address = ""                # Address Lookup Table 地址
+
+[executor.anti_fingerprint]
+cu_jitter_range = 1000          # CU 限制隨機抖動範圍，防止交易指紋辨識
+fee_collectors_sol = [          # SOL 手續費收款地址 (每筆交易隨機選取)
+    "",
+]
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# Jito Bundle 提交
+# 透過 Jito 驗證者打包交易，降低被搶跑風險。
+# ═══════════════════════════════════════════════════════════════════════════════
+[jito]
+enabled = false
+block_engine_urls = [           # Jito 區塊引擎端點 (每次提交隨機選取)
+    "https://mainnet.block-engine.jito.wtf",
+    "https://amsterdam.mainnet.block-engine.jito.wtf",
+    "https://frankfurt.mainnet.block-engine.jito.wtf",
+    "https://ny.mainnet.block-engine.jito.wtf",
+    "https://tokyo.mainnet.block-engine.jito.wtf",
+    "https://slc.mainnet.block-engine.jito.wtf",
+]
+tip_percentage = 60             # 利潤中分給 Jito 驗證者的百分比
+min_tip_lamports = 1000         # 最低小費金額 (lamports)
+min_operator_profit_lamports = 5000  # 扣除小費後最低保留利潤 (lamports)
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# Flashblock 提交
+# 透過 Flashblock 快速出塊服務提交交易。
+# ═══════════════════════════════════════════════════════════════════════════════
+[flashblock]
+enabled = false
+api_key = ""                    # Flashblock API 金鑰
+cu_price_percentage = 30        # 利潤中分配給 CU 價格的百分比
+endpoints = [
+    "https://fra.flashblock.trade",
+    "https://ams.flashblock.trade",
+    "https://nyc.flashblock.trade",
+    "https://tok.flashblock.trade",
+]
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# Astralane 提交
+# 透過 Astralane 閘道提交交易。
+# ═══════════════════════════════════════════════════════════════════════════════
+[astralane]
+enabled = false
+api_key = ""                    # Astralane API 金鑰
+cu_price_percentage = 30        # 利潤中分配給 CU 價格的百分比
+endpoints = [
+    "https://fr.gateway.astralane.io/iris",
+    "https://fr2.gateway.astralane.io/iris",
+    "https://ams.gateway.astralane.io/iris",
+    "https://ams2.gateway.astralane.io/iris",
+    "https://la.gateway.astralane.io/iris",
+    "https://ny.gateway.astralane.io/iris",
+    "https://jp.gateway.astralane.io/iris",
+    "https://sg.gateway.astralane.io/iris",
+    "https://lim.gateway.astralane.io/iris",
+    "https://lit.gateway.astralane.io/iris",
+]

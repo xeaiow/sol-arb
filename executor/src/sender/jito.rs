@@ -36,9 +36,11 @@ impl JitoSender {
         }
     }
 
-    /// Pre-connect gRPC channel at startup
+    /// Pre-connect gRPC channel at startup (5s timeout)
     pub async fn connect(&mut self) -> Result<()> {
         let channel = Channel::from_shared(self.endpoint.clone())?
+            .connect_timeout(std::time::Duration::from_secs(5))
+            .timeout(std::time::Duration::from_secs(5))
             .connect()
             .await?;
         self.client = Some(SearcherServiceClient::new(channel));

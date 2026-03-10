@@ -164,6 +164,17 @@ impl Scanner {
             );
         }
 
+        // --- Backpressure check ---
+        let capacity = self.opportunity_tx.capacity();
+        let max_capacity = self.opportunity_tx.max_capacity();
+        if capacity < max_capacity / 4 {
+            debug!(
+                "Full scan skipped: channel {}/{} capacity, executor behind",
+                capacity, max_capacity,
+            );
+            return;
+        }
+
         // --- Evaluate remaining routes ---
         let mut opportunities = 0;
 

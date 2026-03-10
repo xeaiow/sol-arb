@@ -1,3 +1,23 @@
+[general]
+keypair_path = "~/.config/solana/id.json"
+rpc_url = "https://api.mainnet-beta.solana.com"
+grpc_endpoint = "https://solana-yellowstone-grpc.publicnode.com:443"
+grpc_token = "a8be362b3dad184ed061a9b23a11b180d1551146c82f60c0ae12ffaf51b66a55"
+log_level = "info"
+
+[engine]
+max_hops = 2
+warmup_secs = 30
+warmup_pool_count = 1000
+full_scan_interval_secs = 5
+min_reserve_sol = 10.0
+max_hop_fee = 0.02
+min_profit_sol = 0.001
+max_input_sol = 100.0
+ternary_iterations = 10
+probe_amount_sol = 1.0
+# base_mints = ["So11111111111111111111111111111111111111112", "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v"]
+
 [executor]
 flashloan_enabled = false
 program_id = "8NwGVcMu96JTJwfUKQNXjYMd87JyGWcPkaENe9NPzLCV"
