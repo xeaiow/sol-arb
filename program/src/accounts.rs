@@ -30,9 +30,9 @@ impl DexType {
     /// Number of accounts required for CPI swap on this DEX
     pub fn pool_account_count(&self) -> usize {
         match self {
-            DexType::RaydiumAmmV4 => 8,
-            DexType::RaydiumCpmm => 13,
-            DexType::RaydiumClmm => 14,
+            DexType::RaydiumAmmV4 => 9,
+            DexType::RaydiumCpmm => 14,
+            DexType::RaydiumClmm => 11,
             DexType::PumpFun => 16,
             DexType::PumpSwap => 23,
             DexType::Bonk => 17,

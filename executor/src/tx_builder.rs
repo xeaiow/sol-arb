@@ -19,7 +19,9 @@ use crate::anti_fp;
 use crate::config::ExecutorConfigFile;
 
 // ── DEX Program IDs ──
+const RAYDIUM_AMM_V4_PROGRAM: Pubkey = solana_sdk::pubkey!("675kPX9MHTjS2zt1qfr1NYHuzeLXfQM9H24wFSUt1Mp8");
 const RAYDIUM_CPMM_PROGRAM: Pubkey = solana_sdk::pubkey!("CPMMoo8L3F4NbTegBCKVNunggL7H1ZpdTHKxQB5qKP1C");
+const RAYDIUM_CLMM_PROGRAM: Pubkey = solana_sdk::pubkey!("CAMMCzo5YL8w4VFF8KVHrK22GGUsp5VTaW7grrKgrWqK");
 const PUMPFUN_PROGRAM: Pubkey = solana_sdk::pubkey!("6EF8rrecthR5Dkzon8Nwu78hRvfCKubJ14M5uBEwF6P");
 const PUMPSWAP_PROGRAM: Pubkey = solana_sdk::pubkey!("pAMMBay6oceH9fJKBRHGP5D4bD4sWpmSwMn52FMfXEA");
 const BONKSWAP_PROGRAM: Pubkey = solana_sdk::pubkey!("BSwp6bEBihVLdqJRKGgzjcGLHkcTuzmSo1TQkHepzH8p");
@@ -369,9 +371,9 @@ impl TxBuilder {
         };
 
         match snap.dex_type {
-            // Raydium AMM V4: 8 accounts
+            // Raydium AMM V4: 9 accounts (8 for CPI + program ID)
             // swap.rs: [token_program, amm, amm_authority, coin_vault, pc_vault,
-            //           user_source, user_dest, user_owner]
+            //           user_source, user_dest, user_owner, program]
             DexType::RaydiumAmmV4 => vec![
                 AccountMeta::new_readonly(SPL_TOKEN_PROGRAM_ID, false),
                 AccountMeta::new(pool, false),
@@ -381,6 +383,7 @@ impl TxBuilder {
                 AccountMeta::new(user_input_ata, false),
                 AccountMeta::new(user_output_ata, false),
                 AccountMeta::new_readonly(self.payer_pubkey, true),
+                AccountMeta::new_readonly(RAYDIUM_AMM_V4_PROGRAM, false),
             ],
 
             // Raydium CPMM: 13 accounts
@@ -421,10 +424,11 @@ impl TxBuilder {
                     AccountMeta::new_readonly(input_mint, false),
                     AccountMeta::new_readonly(output_mint, false),
                     AccountMeta::new(observation, false),
+                    AccountMeta::new_readonly(RAYDIUM_CPMM_PROGRAM, false),
                 ]
             }
 
-            // Raydium CLMM: 10 accounts
+            // Raydium CLMM: 11 accounts (10 for CPI + program ID)
             // extra[0]=amm_config, extra[1]=observation_key, extra[2]=tick_array
             // swap.rs: [payer, amm_config, pool_state, input_ata, output_ata,
             //  input_vault, output_vault, observation, token_program, tick_array]
@@ -443,6 +447,7 @@ impl TxBuilder {
                     AccountMeta::new(observation, false),
                     AccountMeta::new_readonly(SPL_TOKEN_PROGRAM_ID, false),
                     AccountMeta::new(tick_array, false),
+                    AccountMeta::new_readonly(RAYDIUM_CLMM_PROGRAM, false),
                 ]
             }
 

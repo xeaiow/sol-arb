@@ -4,7 +4,8 @@ use log::{info, debug};
 use solana_sdk::pubkey::Pubkey;
 use tokio::sync::mpsc;
 
-use solana_streamer_sdk::pool::state::PoolUpdate;
+use solana_streamer_sdk::pool::state::{DexType, PoolMath, PoolUpdate};
+use solana_streamer_sdk::pool::decoder::raydium_clmm;
 
 use crate::config::EngineConfig;
 use crate::graph::{PoolEntry, TokenGraph};
@@ -312,11 +313,13 @@ impl Scanner {
     /// User-specific accounts (payer, user ATAs) and fixed program IDs are
     /// filled in by TxBuilder — this only returns pool-specific accounts.
     fn build_pool_accounts(pool: &PoolEntry, _is_a_to_b: bool) -> Vec<Pubkey> {
-        // For now, include: pool address + vaults + extra_accounts.
-        // The exact ordering per DEX will be refined when TxBuilder
-        // assembles the full transaction (it has access to the payer
-        // and can derive user ATAs, program IDs, etc.).
-        let mut accounts = Vec::with_capacity(4 + pool.extra_accounts.len());
+        // Layout: [pool_address, vault_a, vault_b, extra_accounts...]
+        // TxBuilder expects extra_accounts ordering per DEX:
+        //   RaydiumCpmm: [amm_config, observation_key]
+        //   RaydiumClmm: [amm_config, observation_key, tick_array]
+        //   PumpFun: [creator]
+        //   Bonk: [global_config, platform_config]
+        let mut accounts = Vec::with_capacity(4 + pool.extra_accounts.len() + 1);
         accounts.push(pool.address);
         if let Some(vault_a) = pool.vault_a {
             accounts.push(vault_a);
@@ -325,6 +328,18 @@ impl Scanner {
             accounts.push(vault_b);
         }
         accounts.extend_from_slice(&pool.extra_accounts);
+
+        // CLMM: derive the tick_array PDA for the current tick
+        if pool.dex_type == DexType::RaydiumClmm {
+            if let PoolMath::Concentrated { tick_current, tick_spacing, .. } = &pool.math {
+                // For swap direction, use the current tick array
+                let start_index = raydium_clmm::tick_array_start_index(*tick_current, *tick_spacing);
+                if let Some(pda) = raydium_clmm::tick_array_pda(&pool.address, start_index) {
+                    accounts.push(pda);
+                }
+            }
+        }
+
         accounts
     }
 }
