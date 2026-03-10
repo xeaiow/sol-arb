@@ -1,14 +1,14 @@
 [executor]
 flashloan_enabled = false
-program_id = "11111111111111111111111111111111"
-alt_address = "11111111111111111111111111111111"
+program_id = "8NwGVcMu96JTJwfUKQNXjYMd87JyGWcPkaENe9NPzLCV"
+alt_address = "FNFedTyPSj8b8SQwx6ujyKVVMeP4dXivWa4HDMKqgAfG"
 
 [executor.anti_fingerprint]
 cu_jitter_range = 1000
 fee_collectors_sol = [
-    "11111111111111111111111111111111",
-    "11111111111111111111111111111111",
-    "11111111111111111111111111111111",
+    "A6m1zY2dM2ue4Aem6q2WSZyS3CX4ap39ApyJSCXhB5Fq",
+    "A6m1zY2dM2ue4Aem6q2WSZyS3CX4ap39ApyJSCXhB5Fq",
+    "A6m1zY2dM2ue4Aem6q2WSZyS3CX4ap39ApyJSCXhB5Fq",
 ]
 
 [jito]
@@ -26,7 +26,7 @@ min_tip_lamports = 1000
 min_operator_profit_lamports = 5000
 
 [flashblock]
-enabled = true
+enabled = false
 api_key = ""
 cu_price_percentage = 30
 endpoints = [
@@ -38,7 +38,7 @@ endpoints = [
 
 [astralane]
 enabled = true
-api_key = ""
+api_key = "xyz_06iaBUneeAX291ZtQbMoGEMAStUaW9YXyHo2dIrkVSwSZiEspN75RJjTupMN"
 cu_price_percentage = 30
 endpoints = [
     "https://fr.gateway.astralane.io/iris",
