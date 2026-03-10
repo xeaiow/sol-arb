@@ -14,3 +14,4 @@ five8_const = "0.1"
 [features]
 default = []
 no-entrypoint = []
+test-utils = []

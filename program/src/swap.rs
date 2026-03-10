@@ -306,6 +306,8 @@ fn swap_meteora_damm_v2(accounts: &[AccountView], amount_in: u64) -> ProgramResu
         event_authority: &accounts[12],
         program: &accounts[13],
     };
+    // params layout: [0..8] amount_in (u64 LE), [8..16] minimum_amount_out (u64 LE = 0), [16..31] unused
+    // minimum_amount_out = 0 is safe — profit verified atomically at transaction level
     let mut params = [0u8; 32];
     params[..8].copy_from_slice(&amount_in.to_le_bytes());
     let args = dex_pinocchio_cpi::meteora_damm_v2::SwapArgs { params };

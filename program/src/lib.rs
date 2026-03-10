@@ -1,7 +1,7 @@
-#![no_std]
+#![cfg_attr(not(feature = "test-utils"), no_std)]
 
-mod accounts;
-mod swap;
+pub mod accounts;
+pub mod swap;
 
 use pinocchio::{
     AccountView, Address, ProgramResult,
@@ -10,17 +10,13 @@ use pinocchio::{
 
 #[cfg(not(feature = "no-entrypoint"))]
 mod entrypoint {
-    use pinocchio::{AccountView, Address, ProgramResult, entrypoint};
+    use pinocchio::{
+        program_entrypoint, default_allocator, nostd_panic_handler,
+    };
 
-    entrypoint!(process_instruction);
-
-    pub fn process_instruction(
-        program_id: &Address,
-        accounts: &[AccountView],
-        instruction_data: &[u8],
-    ) -> ProgramResult {
-        crate::process_instruction(program_id, accounts, instruction_data)
-    }
+    program_entrypoint!(crate::process_instruction);
+    default_allocator!();
+    nostd_panic_handler!();
 }
 
 // ── Instruction discriminators ──────────────────────────────────────────────
