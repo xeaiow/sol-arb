@@ -1,0 +1,380 @@
+<div align="center">
+    <h1>🌊 Solana Streamer</h1>
+    <h3><em>Real-time event streaming from Solana DEX trading programs.</em></h3>
+</div>
+
+<p align="center">
+    <strong>A lightweight Rust library providing efficient event parsing and subscription capabilities for PumpFun, PumpSwap, Bonk, and Raydium protocols.</strong>
+</p>
+
+<p align="center">
+    <a href="https://crates.io/crates/solana-streamer-sdk">
+        <img src="https://img.shields.io/crates/v/solana-streamer-sdk.svg" alt="Crates.io">
+    </a>
+    <a href="https://docs.rs/solana-streamer-sdk">
+        <img src="https://docs.rs/solana-streamer-sdk/badge.svg" alt="Documentation">
+    </a>
+    <a href="https://github.com/0xfnzero/solana-streamer/blob/main/LICENSE">
+        <img src="https://img.shields.io/badge/license-MIT-blue.svg" alt="License">
+    </a>
+    <a href="https://github.com/0xfnzero/solana-streamer">
+        <img src="https://img.shields.io/github/stars/0xfnzero/solana-streamer?style=social" alt="GitHub stars">
+    </a>
+    <a href="https://github.com/0xfnzero/solana-streamer/network">
+        <img src="https://img.shields.io/github/forks/0xfnzero/solana-streamer?style=social" alt="GitHub forks">
+    </a>
+</p>
+
+<p align="center">
+    <img src="https://img.shields.io/badge/Rust-000000?style=for-the-badge&logo=rust&logoColor=white" alt="Rust">
+    <img src="https://img.shields.io/badge/Solana-9945FF?style=for-the-badge&logo=solana&logoColor=white" alt="Solana">
+    <img src="https://img.shields.io/badge/Streaming-FF6B6B?style=for-the-badge&logo=livestream&logoColor=white" alt="Real-time Streaming">
+    <img src="https://img.shields.io/badge/gRPC-4285F4?style=for-the-badge&logo=grpc&logoColor=white" alt="gRPC">
+</p>
+
+<p align="center">
+    <a href="README_CN.md">中文</a> | 
+    <a href="README.md">English</a> | 
+    <a href="https://fnzero.dev/">Website</a> |
+    <a href="https://t.me/fnzero_group">Telegram</a> |
+    <a href="https://discord.gg/vuazbGkqQE">Discord</a>
+</p>
+
+---
+
+## Table of Contents
+
+- [🚀 Project Features](#-project-features)
+- [⚡ Installation](#-installation)
+- [🔄 Migration Guide](#-migration-guide)
+- [⚙️ Configuration System](#️-configuration-system)
+- [📚 Usage Examples](#-usage-examples)
+- [🔧 Supported Protocols](#-supported-protocols)
+- [🌐 Event Streaming Services](#-event-streaming-services)
+- [🏗️ Architecture Features](#️-architecture-features)
+- [📁 Project Structure](#-project-structure)
+- [⚡ Performance Considerations](#-performance-considerations)
+- [📄 License](#-license)
+- [📞 Contact](#-contact)
+- [⚠️ Important Notes](#️-important-notes)
+
+## 🚀 Project Features
+
+### Core Capabilities
+- **Real-time Event Streaming**: Subscribe to live trading events from multiple Solana DEX protocols
+- **Yellowstone gRPC Support**: High-performance event subscription using Yellowstone gRPC
+- **ShredStream Support**: Alternative event streaming using ShredStream protocol
+- **Unified Event Interface**: Consistent event handling across all supported protocols
+
+### Multi-Protocol Support
+- **PumpFun**: Meme coin trading platform events
+- **PumpSwap**: PumpFun's swap protocol events
+- **Bonk**: Token launch platform events (letsbonk.fun)
+- **Raydium CPMM**: Raydium's Concentrated Pool Market Maker events
+- **Raydium CLMM**: Raydium's Concentrated Liquidity Market Maker events
+- **Raydium AMM V4**: Raydium's Automated Market Maker V4 events
+
+### Advanced Features
+- **Event Parsing System**: Automatic parsing and categorization of protocol-specific events
+- **Account State Monitoring**: Real-time monitoring of protocol account states and configuration changes
+- **Transaction & Account Event Filtering**: Separate filtering for transaction events and account state changes
+- **Dynamic Subscription Management**: Runtime filter updates without reconnection, enabling adaptive monitoring strategies
+- **Multi-Filter Support**: Support for multiple transaction and account filters in a single subscription
+- **Advanced Account Filtering**: Memcmp filters for precise account data matching and monitoring
+- **Token2022 Support**: Enhanced support for SPL Token 2022 with extended state parsing
+
+### Performance & Optimization
+- **High Performance**: Optimized for low-latency event processing
+- **Batch Processing Optimization**: Batch processing events to reduce callback overhead
+- **Performance Monitoring**: Built-in performance metrics monitoring, including event processing speed
+- **Memory Optimization**: Object pooling and caching mechanisms to reduce memory allocations
+- **Flexible Configuration System**: Support for custom batch sizes, backpressure strategies, channel sizes
+- **Preset Configurations**: High-throughput and low-latency preset configurations optimized for different use cases
+- **Backpressure Handling**: Supports blocking and dropping backpressure strategies
+- **Runtime Configuration Updates**: Dynamic configuration parameter updates at runtime
+- **Graceful Shutdown**: Support for programmatic stop() method for clean shutdown
+
+## ⚡ Installation
+
+### Direct Clone
+
+Clone this project to your project directory:
+
+```bash
+cd your_project_root_directory
+git clone https://github.com/0xfnzero/solana-streamer
+```
+
+Add the dependency to your `Cargo.toml`:
+
+```toml
+# Add to your Cargo.toml
+solana-streamer-sdk = { path = "./solana-streamer", version = "1.3.0" }
+```
+
+### Use crates.io
+
+```toml
+# Add to your Cargo.toml
+solana-streamer-sdk = "1.3.0"
+```
+
+## 🔄 Migration Guide
+
+### Migrating from v0.5.x to v1.x.x
+
+Version 1.0.0 introduces a major architectural change from trait-based event handling to enum-based events. This provides better type safety, improved performance, and simpler code patterns.
+
+**Key Changes:**
+
+1. **Event Type Changed** - `Box<dyn UnifiedEvent>` → `DexEvent` enum
+2. **Callback Signature** - Callbacks now receive concrete `DexEvent` instead of trait objects
+3. **Event Matching** - Use standard Rust `match` instead of `match_event!` macro
+4. **Metadata Access** - Event properties now accessed through `.metadata()` method
+
+For detailed migration steps and code examples, see [MIGRATION.md](MIGRATION.md) or [MIGRATION_CN.md](MIGRATION_CN.md) (Chinese version).
+
+**Quick Migration Example:**
+
+```rust
+// Old (v0.5.x)
+let callback = |event: Box<dyn UnifiedEvent>| {
+    println!("Event: {:?}", event.event_type());
+};
+
+// New (v1.x.x)
+let callback = |event: DexEvent| {
+    println!("Event: {:?}", event.metadata().event_type);
+};
+```
+
+## ⚙️ Configuration System
+
+You can customize client configuration:
+
+```rust
+use solana_streamer_sdk::streaming::grpc::ClientConfig;
+
+// Use default configuration
+let grpc = YellowstoneGrpc::new(endpoint, token)?;
+
+// Or create custom configuration
+let mut config = ClientConfig::default();
+config.enable_metrics = true;  // Enable performance monitoring
+config.connection.connect_timeout = 30;  // 30 seconds
+config.connection.request_timeout = 120;  // 120 seconds
+
+let grpc = YellowstoneGrpc::new_with_config(endpoint, token, config)?;
+```
+
+**Available Configuration Options:**
+- `enable_metrics`: Enable/disable performance monitoring (default: false)
+- `connection.connect_timeout`: Connection timeout in seconds (default: 10)
+- `connection.request_timeout`: Request timeout in seconds (default: 60)
+- `connection.max_decoding_message_size`: Maximum message size in bytes (default: 10MB)
+
+## 📚 Usage Examples
+
+### Usage Examples Summary Table
+
+| Description | Run Command | Source Path |
+|------|---------|----------|
+| Monitor transaction events using Yellowstone gRPC | `cargo run --example grpc_example` | [examples/grpc_example.rs](examples/grpc_example.rs) |
+| Monitor transaction events using ShredStream | `cargo run --example shred_example` | [examples/shred_example.rs](examples/shred_example.rs) |
+| Parse Solana mainnet transaction data | `cargo run --example parse_tx_events` | [examples/parse_tx_events.rs](examples/parse_tx_events.rs) |
+| Parse PumpFun transaction from RPC (signature: `TX_SIGNATURE` or CLI arg) | `cargo run --example parse_pump_tx --release` | [examples/parse_pump_tx.rs](examples/parse_pump_tx.rs) |
+| Parse PumpSwap transaction from RPC | `cargo run --example parse_pumpswap_tx --release` | [examples/parse_pumpswap_tx.rs](examples/parse_pumpswap_tx.rs) |
+| Parse Meteora DAMM v2 transaction from RPC | `TX_SIGNATURE=<sig> cargo run --example parse_meteora_damm_tx --release` | [examples/parse_meteora_damm_tx.rs](examples/parse_meteora_damm_tx.rs) |
+| Debug PumpFun transaction (fetch, print meta/logs, parse) | `TX_SIGNATURE=<sig> cargo run --example debug_pump_tx --release` | [examples/debug_pump_tx.rs](examples/debug_pump_tx.rs) |
+| Debug PumpSwap transaction (fetch, print meta, parse) | `TX_SIGNATURE=<sig> cargo run --example debug_pumpswap_tx --release` | [examples/debug_pumpswap_tx.rs](examples/debug_pumpswap_tx.rs) |
+| Update filters at runtime | `cargo run --example dynamic_subscription` | [examples/dynamic_subscription.rs](examples/dynamic_subscription.rs) |
+| Quick test: subscribe to PumpFun, print first 10 or run 60s | `cargo run --example pumpfun_quick_test --release` | [examples/pumpfun_quick_test.rs](examples/pumpfun_quick_test.rs) |
+| PumpFun trade filter: Buy/Sell/Create with latency | `cargo run --example pumpfun_trade_filter --release` | [examples/pumpfun_trade_filter.rs](examples/pumpfun_trade_filter.rs) |
+| PumpFun gRPC subscription with metrics | `cargo run --example pumpfun_with_metrics --release` | [examples/pumpfun_with_metrics.rs](examples/pumpfun_with_metrics.rs) |
+| PumpSwap gRPC subscription with metrics | `cargo run --example pumpswap_with_metrics --release` | [examples/pumpswap_with_metrics.rs](examples/pumpswap_with_metrics.rs) |
+| Meteora DAMM v2 gRPC subscription | `cargo run --example meteora_damm_grpc --release` | [examples/meteora_damm_grpc.rs](examples/meteora_damm_grpc.rs) |
+| Monitor specific token account balance changes | `cargo run --example token_balance_listen_example` | [examples/token_balance_listen_example.rs](examples/token_balance_listen_example.rs) |
+| Monitor token decimals via account subscription | `cargo run --example token_decimals_listen_example` | [examples/token_decimals_listen_example.rs](examples/token_decimals_listen_example.rs) |
+| Track nonce account state changes | `cargo run --example nonce_listen_example` | [examples/nonce_listen_example.rs](examples/nonce_listen_example.rs) |
+| Monitor PumpSwap pool accounts using memcmp filters | `cargo run --example pumpswap_pool_account_listen_example` | [examples/pumpswap_pool_account_listen_example.rs](examples/pumpswap_pool_account_listen_example.rs) |
+| Monitor all associated token accounts for specific mints using memcmp filters | `cargo run --example mint_all_ata_account_listen_example` | [examples/mint_all_ata_account_listen_example.rs](examples/mint_all_ata_account_listen_example.rs) |
+
+### Event Filtering
+
+The library supports flexible event filtering to reduce processing overhead and improve performance:
+
+#### Basic Filtering
+
+```rust
+use solana_streamer_sdk::streaming::event_parser::common::{filter::EventTypeFilter, EventType};
+
+// No filtering - receive all events
+let event_type_filter = None;
+
+// Filter specific event types - only receive PumpSwap buy/sell events
+let event_type_filter = Some(EventTypeFilter { 
+    include: vec![EventType::PumpSwapBuy, EventType::PumpSwapSell] 
+});
+```
+
+#### Performance Impact
+
+Event filtering can provide significant performance improvements:
+- **60-80% reduction** in unnecessary event processing
+- **Lower memory usage** by filtering out irrelevant events
+- **Reduced network bandwidth** in distributed setups
+- **Better focus** on events that matter to your application
+
+#### Filtering Examples by Use Case
+
+**Trading Bot (Focus on Trade Events)**
+```rust
+let event_type_filter = Some(EventTypeFilter { 
+    include: vec![
+        EventType::PumpSwapBuy,
+        EventType::PumpSwapSell,
+        EventType::PumpFunTrade,
+        EventType::RaydiumCpmmSwap,
+        EventType::RaydiumClmmSwap,
+        EventType::RaydiumAmmV4Swap,
+        ......
+    ] 
+});
+```
+
+**Pool Monitoring (Focus on Liquidity Events)**
+```rust
+let event_type_filter = Some(EventTypeFilter { 
+    include: vec![
+        EventType::PumpSwapCreatePool,
+        EventType::PumpSwapDeposit,
+        EventType::PumpSwapWithdraw,
+        EventType::RaydiumCpmmInitialize,
+        EventType::RaydiumCpmmDeposit,
+        EventType::RaydiumCpmmWithdraw,
+        EventType::RaydiumClmmCreatePool,
+        ......
+    ] 
+});
+```
+
+## Dynamic Subscription Management
+
+Update subscription filters at runtime without reconnecting to the stream.
+
+```rust
+// Update filters on existing subscription
+grpc.update_subscription(
+    vec![TransactionFilter {
+        account_include: vec!["new_program_id".to_string()],
+        account_exclude: vec![],
+        account_required: vec![],
+    }],
+    vec![AccountFilter {
+        account: vec![],
+        owner: vec![],
+        filters: vec![],
+    }],
+).await?;
+```
+
+- **No Reconnection**: Filter changes apply immediately without closing the stream
+- **Atomic Updates**: Both transaction and account filters updated together
+- **Single Subscription**: One active subscription per client instance
+- **Compatible**: Works with both immediate and advanced subscription methods
+
+Note: Multiple subscription attempts on the same client return an error.
+
+## 🔧 Supported Protocols
+
+- **PumpFun**: Primary meme coin trading platform
+- **PumpSwap**: PumpFun's swap protocol
+- **Bonk**: Token launch platform (letsbonk.fun)
+- **Raydium CPMM**: Raydium's Concentrated Pool Market Maker protocol
+- **Raydium CLMM**: Raydium's Concentrated Liquidity Market Maker protocol
+- **Raydium AMM V4**: Raydium's Automated Market Maker V4 protocol
+
+## 🌐 Event Streaming Services
+
+- **Yellowstone gRPC**: High-performance Solana event streaming
+- **ShredStream**: Alternative event streaming protocol
+
+## 🏗️ Architecture Features
+
+### Unified Event Interface
+
+- **DexEvent Enum**: Type-safe enum containing all protocol events
+- **Protocol Enum**: Easy identification of event sources
+- **Event Factory**: Automatic event parsing and categorization
+
+### Event Parsing System
+
+- **Protocol-specific Parsers**: Dedicated parsers for each supported protocol
+- **Event Factory**: Centralized event creation and parsing
+- **Extensible Design**: Easy to add new protocols and event types
+
+### Streaming Infrastructure
+
+- **Yellowstone gRPC Client**: Optimized for Solana event streaming
+- **ShredStream Client**: Alternative streaming implementation
+- **Async Processing**: Non-blocking event handling
+
+## 📁 Project Structure
+
+```
+src/
+├── common/           # Common functionality and types
+├── protos/           # Protocol buffer definitions
+├── streaming/        # Event streaming system
+│   ├── event_parser/ # Event parsing system
+│   │   ├── common/   # Common event parsing tools
+│   │   ├── core/     # Core parsing traits and interfaces
+│   │   ├── protocols/# Protocol-specific parsers
+│   │   │   ├── bonk/ # Bonk event parsing
+│   │   │   ├── pumpfun/ # PumpFun event parsing
+│   │   │   ├── pumpswap/ # PumpSwap event parsing
+│   │   │   ├── raydium_amm_v4/ # Raydium AMM V4 event parsing
+│   │   │   ├── raydium_cpmm/ # Raydium CPMM event parsing
+│   │   │   └── raydium_clmm/ # Raydium CLMM event parsing
+│   │   └── factory.rs # Parser factory
+│   ├── shred_stream.rs # ShredStream client
+│   ├── yellowstone_grpc.rs # Yellowstone gRPC client
+│   └── yellowstone_sub_system.rs # Yellowstone subsystem
+├── lib.rs            # Main library file
+└── main.rs           # Example program
+```
+
+## ⚡ Performance Considerations
+
+1. **Connection Management**: Properly handle connection lifecycle and reconnection
+2. **Event Filtering**: Use protocol filtering to reduce unnecessary event processing
+3. **Memory Management**: Implement appropriate cleanup for long-running streams
+4. **Error Handling**: Robust error handling for network issues and service interruptions
+5. **Batch Processing Optimization**: Use batch processing to reduce callback overhead and improve throughput
+6. **Performance Monitoring**: Enable performance monitoring to identify bottlenecks and optimization opportunities
+7. **Graceful Shutdown**: Use the stop() method for clean shutdown and implement signal handlers for proper resource cleanup
+
+---
+
+## 📄 License
+
+MIT License
+
+## 📞 Contact
+
+- **Website**: https://fnzero.dev/
+- **Project Repository**: https://github.com/0xfnzero/solana-streamer
+- **Telegram Group**: https://t.me/fnzero_group
+- **Discord**: https://discord.gg/vuazbGkqQE
+
+## ⚠️ Important Notes
+
+1. **Network Stability**: Ensure stable network connection for continuous event streaming
+2. **Rate Limiting**: Be aware of rate limits on public gRPC endpoints
+3. **Error Recovery**: Implement proper error handling and reconnection logic
+5. **Compliance**: Ensure compliance with relevant laws and regulations
+
+## Language Versions
+
+- [English](README.md)
+- [中文](README_CN.md)
