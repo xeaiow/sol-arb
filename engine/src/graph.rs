@@ -169,6 +169,22 @@ impl TokenGraph {
         }
     }
 
+    /// Check if a pool is dead (zero output in both directions)
+    pub fn is_pool_dead(&self, pool_index: u32) -> bool {
+        let pool = &self.pools[pool_index as usize];
+        let probe = 1_000_000u64; // 0.001 SOL
+        let out_a_to_b = pool.math.get_amount_out(probe, true);
+        let out_b_to_a = pool.math.get_amount_out(probe, false);
+        out_a_to_b == 0 && out_b_to_a == 0
+    }
+
+    /// Remove edges for a dead pool from adjacency lists
+    pub fn remove_pool_edges(&mut self, pool_index: u32) {
+        for adj in self.adjacency.iter_mut() {
+            adj.retain(|e| e.pool_index != pool_index);
+        }
+    }
+
     pub fn pool_count(&self) -> usize {
         self.pools.len()
     }

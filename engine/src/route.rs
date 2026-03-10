@@ -204,6 +204,28 @@ impl RouteTable {
         }
     }
 
+    /// Remove all routes that contain any of the given dead pool indices,
+    /// and rebuild the inverted index.
+    pub fn remove_routes_with_pools(&mut self, dead_pools: &[u32]) {
+        let dead_set: HashSet<u32> = dead_pools.iter().copied().collect();
+
+        self.routes.retain(|route| {
+            !route.hops.iter().any(|h| dead_set.contains(&h.pool_index))
+        });
+
+        // Rebuild inverted index (pool_to_routes indices changed after retain)
+        let max_pool = self.routes.iter()
+            .flat_map(|r| r.hops.iter().map(|h| h.pool_index))
+            .max()
+            .map(|m| m as usize + 1)
+            .unwrap_or(0);
+
+        self.index = RouteIndex::new(max_pool);
+        for (i, route) in self.routes.iter().enumerate() {
+            self.index.register_route(i as u32, route);
+        }
+    }
+
     pub fn route_count(&self) -> usize {
         self.routes.len()
     }

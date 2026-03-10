@@ -132,9 +132,39 @@ impl Scanner {
         }
     }
 
-    /// Full scan: evaluate all routes
-    fn full_scan(&self) {
+    /// Full scan: prune dead pools, then evaluate all routes
+    fn full_scan(&mut self) {
         let start = Instant::now();
+
+        // --- Dead pool pruning ---
+        let pool_count = self.graph.pool_count();
+        let mut dead_pools: Vec<u32> = Vec::new();
+        for i in 0..pool_count {
+            if self.graph.is_pool_dead(i as u32) {
+                dead_pools.push(i as u32);
+            }
+        }
+
+        if !dead_pools.is_empty() {
+            for &pi in &dead_pools {
+                self.graph.remove_pool_edges(pi);
+            }
+
+            // Remove routes that reference any dead pool
+            let routes_before = self.route_table.routes.len();
+            self.route_table.remove_routes_with_pools(&dead_pools);
+            let routes_after = self.route_table.routes.len();
+
+            info!(
+                "Pruned {} dead pools, removed {} routes ({} -> {})",
+                dead_pools.len(),
+                routes_before - routes_after,
+                routes_before,
+                routes_after,
+            );
+        }
+
+        // --- Evaluate remaining routes ---
         let mut opportunities = 0;
 
         for route in &self.route_table.routes {
