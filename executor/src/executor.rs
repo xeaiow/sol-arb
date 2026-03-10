@@ -35,6 +35,12 @@ impl Executor {
         // Pre-initialize TxBuilder
         let mut tx_builder = TxBuilder::from_config(&config, payer_pubkey);
 
+        // Test mode: skip on-chain profit verification (set TEST_MODE=1)
+        if std::env::var("TEST_MODE").map_or(false, |v| v == "1") {
+            tx_builder.test_mode = true;
+            warn!("⚠️ TEST MODE ENABLED — profit verification disabled!");
+        }
+
         // Pre-load ALT
         info!("Loading ALT...");
         let alt_address = config.executor.alt_address.parse()?;

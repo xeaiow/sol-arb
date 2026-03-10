@@ -47,6 +47,32 @@ pub fn execute(
     Ok(())
 }
 
+/// Test mode: execute swaps without profit verification.
+/// WARNING: will lose money if swap is unprofitable. For testing only.
+pub fn execute_test(
+    _program_id: &Address,
+    accounts: &[AccountView],
+    data: &[u8],
+    hops: u8,
+) -> ProgramResult {
+    let ix = SwapInstruction::parse(data, hops)?;
+
+    for i in 0..ix.hop_count {
+        let hop = &ix.hops[i as usize];
+        let pool_start = pool_accounts_start(ix.hop_count, i, &ix.hops);
+        let pool_end = pool_start + hop.dex_type.pool_account_count();
+
+        if pool_end > accounts.len() {
+            return Err(ProgramError::NotEnoughAccountKeys);
+        }
+
+        let amount = if i == 0 { ix.amount_in } else { 0 };
+        dispatch_swap(hop, &accounts[pool_start..pool_end], amount)?;
+    }
+
+    Ok(())
+}
+
 /// Read SPL token account balance at byte offset 64 (u64 LE).
 fn read_token_balance(account: &AccountView) -> Result<u64, ProgramError> {
     let data = account.try_borrow()?;

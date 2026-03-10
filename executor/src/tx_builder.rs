@@ -97,6 +97,8 @@ pub struct TxBuilder {
     jito_enabled: bool,
     swqos_enabled: bool,
     alt: Option<Arc<Tier0Alt>>,
+    /// Test mode: skip profit verification on-chain (discriminator +3)
+    pub test_mode: bool,
 }
 
 impl TxBuilder {
@@ -139,6 +141,7 @@ impl TxBuilder {
             jito_enabled,
             swqos_enabled: flashblock_enabled || astralane_enabled,
             alt: None,
+            test_mode: false,
         }
     }
 
@@ -168,6 +171,9 @@ impl TxBuilder {
 
         let arb_ix = self.build_arb_instruction(opp);
 
+        // Create ATA instructions for base mint + all intermediate mints
+        let create_ata_ixs = self.build_create_ata_ixs(opp);
+
         let lookup_tables: Vec<AddressLookupTableAccount> = self
             .alt
             .as_ref()
@@ -179,11 +185,13 @@ impl TxBuilder {
             let tip = self.calculate_jito_tip(opp.expected_profit);
             tip.map(|tip| {
                 let tip_account = anti_fp::random_tip_account();
-                vec![
+                let mut ixs = vec![
                     ComputeBudgetInstruction::set_compute_unit_limit(cu_limit),
-                    arb_ix.clone(),
-                    system_instruction::transfer(&payer.pubkey(), &tip_account, tip),
-                ]
+                ];
+                ixs.extend(create_ata_ixs.clone());
+                ixs.push(arb_ix.clone());
+                ixs.push(system_instruction::transfer(&payer.pubkey(), &tip_account, tip));
+                ixs
             })
         } else {
             None
@@ -196,12 +204,14 @@ impl TxBuilder {
             let tip_account = ASTRALANE_TIP_ACCOUNTS[
                 rand::random::<usize>() % ASTRALANE_TIP_ACCOUNTS.len()
             ];
-            Some(vec![
+            let mut ixs = vec![
                 ComputeBudgetInstruction::set_compute_unit_limit(cu_limit),
                 ComputeBudgetInstruction::set_compute_unit_price(cu_price),
-                arb_ix,
-                system_instruction::transfer(&payer.pubkey(), &tip_account, astralane_tip),
-            ])
+            ];
+            ixs.extend(create_ata_ixs);
+            ixs.push(arb_ix);
+            ixs.push(system_instruction::transfer(&payer.pubkey(), &tip_account, astralane_tip));
+            Some(ixs)
         } else {
             None
         };
@@ -253,8 +263,9 @@ impl TxBuilder {
     fn encode_instruction_data(&self, opp: &Opportunity, hop_count: u8) -> Vec<u8> {
         let mut data = Vec::with_capacity(20);
 
-        // Discriminator: 0=2hop, 1=3hop, 2=4hop
-        data.push(hop_count - 2);
+        // Discriminator: 0=2hop, 1=3hop, 2=4hop; test mode: 3=2hop, 4=3hop, 5=4hop
+        let disc = if self.test_mode { hop_count - 2 + 3 } else { hop_count - 2 };
+        data.push(disc);
 
         // First (buy) and last (sell) DEX types
         data.push(opp.pool_snapshots[0].dex_type as u8);
@@ -670,6 +681,37 @@ impl TxBuilder {
             return None; // Not profitable enough
         }
         Some(tip)
+    }
+
+    /// Build create_associated_token_account_idempotent instructions
+    /// for base mint and all intermediate mints. Idempotent = no-op if exists.
+    fn build_create_ata_ixs(&self, opp: &Opportunity) -> Vec<Instruction> {
+        let mut mints = Vec::new();
+        let hop_count = opp.route.hops.len();
+
+        // Intermediate mints (between hops)
+        for i in 1..hop_count {
+            let prev = &opp.pool_snapshots[i - 1];
+            let mint = if prev.is_a_to_b { prev.mint_b } else { prev.mint_a };
+            if !mints.contains(&mint) {
+                mints.push(mint);
+            }
+        }
+
+        mints.iter().map(|mint| {
+            Instruction {
+                program_id: ATA_PROGRAM_ID,
+                accounts: vec![
+                    AccountMeta::new(self.payer_pubkey, true),       // funding
+                    AccountMeta::new(derive_ata(&self.payer_pubkey, mint), false), // ATA
+                    AccountMeta::new_readonly(self.payer_pubkey, false), // wallet
+                    AccountMeta::new_readonly(*mint, false),         // mint
+                    AccountMeta::new_readonly(SYSTEM_PROGRAM_ID, false),
+                    AccountMeta::new_readonly(SPL_TOKEN_PROGRAM_ID, false),
+                ],
+                data: vec![1], // 1 = CreateIdempotent
+            }
+        }).collect()
     }
 
     fn calculate_cu_price(&self, expected_profit: u64, base_cu: u32) -> u64 {

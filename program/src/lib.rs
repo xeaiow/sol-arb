@@ -24,6 +24,10 @@ mod entrypoint {
 pub const SWAP_2HOP: u8 = 0;
 pub const SWAP_3HOP: u8 = 1;
 pub const SWAP_4HOP: u8 = 2;
+// Test mode: execute swaps but skip profit verification
+pub const SWAP_2HOP_TEST: u8 = 3;
+pub const SWAP_3HOP_TEST: u8 = 4;
+pub const SWAP_4HOP_TEST: u8 = 5;
 
 // ── Dispatch ────────────────────────────────────────────────────────────────
 
@@ -40,6 +44,9 @@ pub fn process_instruction(
         SWAP_2HOP => swap::execute(program_id, accounts, data, 2),
         SWAP_3HOP => swap::execute(program_id, accounts, data, 3),
         SWAP_4HOP => swap::execute(program_id, accounts, data, 4),
+        SWAP_2HOP_TEST => swap::execute_test(program_id, accounts, data, 2),
+        SWAP_3HOP_TEST => swap::execute_test(program_id, accounts, data, 3),
+        SWAP_4HOP_TEST => swap::execute_test(program_id, accounts, data, 4),
         _ => Err(ProgramError::InvalidInstructionData),
     }
 }
