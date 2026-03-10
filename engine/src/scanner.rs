@@ -279,6 +279,11 @@ impl Scanner {
             if pool.last_updated_slot > max_slot {
                 max_slot = pool.last_updated_slot;
             }
+            let accounts = Self::build_pool_accounts(pool, hop.is_a_to_b);
+            if accounts.is_empty() {
+                // Pool not ready (e.g. CLMM without tick arrays loaded)
+                return false;
+            }
             pool_snapshots.push(PoolSnapshot {
                 address: pool.address,
                 dex_type: pool.dex_type,
@@ -287,7 +292,7 @@ impl Scanner {
                 is_a_to_b: hop.is_a_to_b,
                 mint_a_is_2022: pool.mint_a_is_2022,
                 mint_b_is_2022: pool.mint_b_is_2022,
-                accounts: Self::build_pool_accounts(pool, hop.is_a_to_b),
+                accounts,
             });
         }
 
@@ -329,13 +334,25 @@ impl Scanner {
         }
         accounts.extend_from_slice(&pool.extra_accounts);
 
-        // CLMM: derive the tick_array PDA for the current tick
+        // CLMM: use tick_array PDA from pre-loaded tick arrays (known to exist on-chain).
+        // If no tick arrays loaded yet, return empty vec to signal this pool isn't ready.
         if pool.dex_type == DexType::RaydiumClmm {
-            if let PoolMath::Concentrated { tick_current, tick_spacing, .. } = &pool.math {
-                // For swap direction, use the current tick array
-                let start_index = raydium_clmm::tick_array_start_index(*tick_current, *tick_spacing);
-                if let Some(pda) = raydium_clmm::tick_array_pda(&pool.address, start_index) {
-                    accounts.push(pda);
+            if let PoolMath::Concentrated { tick_current, tick_spacing, tick_arrays, .. } = &pool.math {
+                if tick_arrays.is_empty() {
+                    // No tick arrays loaded — pool not ready for CLMM swap
+                    return vec![];
+                }
+                let current_start = raydium_clmm::tick_array_start_index(*tick_current, *tick_spacing);
+                // Prefer the tick array containing tick_current; fallback to closest
+                let best_ta = tick_arrays.iter()
+                    .find(|ta| ta.start_tick_index == current_start)
+                    .or_else(|| tick_arrays.iter().min_by_key(|ta| {
+                        (ta.start_tick_index - current_start).unsigned_abs()
+                    }));
+                if let Some(ta) = best_ta {
+                    if let Some(pda) = raydium_clmm::tick_array_pda(&pool.address, ta.start_tick_index) {
+                        accounts.push(pda);
+                    }
                 }
             }
         }

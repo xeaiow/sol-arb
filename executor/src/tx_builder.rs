@@ -171,6 +171,12 @@ impl TxBuilder {
 
         let arb_ix = self.build_arb_instruction(opp);
 
+        // If accounts are empty (missing required data), return empty TxPair
+        if arb_ix.accounts.is_empty() {
+            log::warn!("Skipping opportunity: missing required accounts");
+            return TxPair { jito_tx: None, swqos_tx: None };
+        }
+
         // Create ATA instructions for base mint + all intermediate mints
         let create_ata_ixs = self.build_create_ata_ixs(opp);
 
@@ -352,6 +358,10 @@ impl TxBuilder {
         // PoolSnapshot.accounts layout: [pool_address, vault_a?, vault_b?, extra...]
         for snapshot in &opp.pool_snapshots {
             let hop_metas = self.build_hop_accounts(snapshot);
+            if hop_metas.is_empty() {
+                // Missing required accounts (e.g. CLMM tick_array) — abort
+                return vec![];
+            }
             metas.extend(hop_metas);
         }
 
@@ -446,7 +456,11 @@ impl TxBuilder {
             DexType::RaydiumClmm => {
                 let amm_config = extra.first().copied().unwrap_or_default();
                 let observation = extra.get(1).copied().unwrap_or_default();
-                let tick_array = extra.get(2).copied().unwrap_or_default();
+                let tick_array = extra.get(2).copied().unwrap_or(Pubkey::default());
+                if tick_array == Pubkey::default() {
+                    log::warn!("CLMM tick_array missing for pool {}, skipping hop", pool);
+                    return vec![];
+                }
                 vec![
                     AccountMeta::new(self.payer_pubkey, true),
                     AccountMeta::new_readonly(amm_config, false),
