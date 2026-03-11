@@ -86,19 +86,28 @@ impl PoolMath {
             PoolMath::BondingCurve {
                 virtual_token_reserves,
                 virtual_sol_reserves,
-                ..
+                real_token_reserves,
+                real_sol_reserves,
+                complete,
             } => {
-                let (r_in, r_out) = if is_a_to_b {
-                    (*virtual_sol_reserves as f64, *virtual_token_reserves as f64)
+                // Completed bonding curves are migrated to Raydium, no longer tradeable
+                if *complete {
+                    return 0;
+                }
+                let (r_in, r_out, real_cap) = if is_a_to_b {
+                    // SOL → Token: capped by real_token_reserves
+                    (*virtual_sol_reserves as f64, *virtual_token_reserves as f64, *real_token_reserves)
                 } else {
-                    (*virtual_token_reserves as f64, *virtual_sol_reserves as f64)
+                    // Token → SOL: capped by real_sol_reserves
+                    (*virtual_token_reserves as f64, *virtual_sol_reserves as f64, *real_sol_reserves)
                 };
                 if r_in == 0.0 || r_out == 0.0 {
                     return 0;
                 }
                 let amt = amount_in as f64 * 0.99; // 1% fee
                 let out = (r_out * amt) / (r_in + amt);
-                out as u64
+                // Cap output by real reserves (what's actually available)
+                (out as u64).min(real_cap)
             }
             PoolMath::Concentrated {
                 sqrt_price_x64,

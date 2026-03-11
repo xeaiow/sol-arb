@@ -26,6 +26,7 @@ solana-compute-budget-interface = "3.0.0"
 solana-system-interface = "2.0.0"
 bs58 = "0.5"
 base64 = "0.22"
+solana-account-decoder = "3.1.9"
 
 [build-dependencies]
 tonic-build = "0.12"

@@ -1,7 +1,8 @@
 use anyhow::Result;
+use solana_account_decoder::UiAccountEncoding;
 use solana_client::{
     nonblocking::rpc_client::RpcClient,
-    rpc_config::RpcProgramAccountsConfig,
+    rpc_config::{RpcAccountInfoConfig, RpcProgramAccountsConfig},
     rpc_filter::{Memcmp, RpcFilterType},
 };
 use solana_sdk::{
@@ -74,6 +75,21 @@ impl MarginFiState {
             program_id, group, account, banks.len()
         );
 
+        // Log addresses needed for ALT
+        log::info!("MarginFi ALT addresses needed:");
+        log::info!("  program:  {}", program_id);
+        log::info!("  group:    {}", group);
+        log::info!("  account:  {}", account);
+        log::info!("  sysvar_instructions: {}", sysvar::instructions::ID);
+        // Log WSOL bank details (the one we'll use for flashloan)
+        let wsol_mint: Pubkey = "So11111111111111111111111111111111111111112".parse().unwrap();
+        if let Some(bank) = banks.get(&wsol_mint) {
+            log::info!("  wsol_bank:      {}", bank.address);
+            log::info!("  wsol_oracle:    {}", bank.oracle);
+            log::info!("  wsol_vault:     {}", bank.vault);
+            log::info!("  wsol_vault_auth: {}", bank.vault_authority);
+        }
+
         Ok(Self {
             program_id,
             group,
@@ -101,6 +117,10 @@ impl MarginFiState {
 
         let config = RpcProgramAccountsConfig {
             filters: Some(filters),
+            account_config: RpcAccountInfoConfig {
+                encoding: Some(UiAccountEncoding::Base64),
+                ..Default::default()
+            },
             ..Default::default()
         };
 
@@ -139,6 +159,10 @@ impl MarginFiState {
 
         let config = RpcProgramAccountsConfig {
             filters: Some(filters),
+            account_config: RpcAccountInfoConfig {
+                encoding: Some(UiAccountEncoding::Base64),
+                ..Default::default()
+            },
             ..Default::default()
         };
 
