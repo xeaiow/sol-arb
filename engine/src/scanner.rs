@@ -165,17 +165,25 @@ impl Scanner {
         let mut dead_pools: Vec<u32> = Vec::new();
         for i in 0..pool_count {
             let pool = &self.graph.pools[i];
-            // Only prune pools that have received at least one update (last_updated_slot > 0).
-            // Newly registered pools may have reserve=0 because vault balance hasn't arrived yet.
-            // Never prune CLMM pools with empty tick_arrays — they aren't dead, just not loaded yet.
-            if pool.last_updated_slot > 0 && self.graph.is_pool_dead(i as u32) {
-                if pool.dex_type == DexType::RaydiumClmm {
-                    if let PoolMath::Concentrated { tick_arrays, .. } = &pool.math {
-                        if tick_arrays.is_empty() {
-                            continue; // Not dead, just tick arrays not loaded
-                        }
+            // Skip pools that haven't received any update yet.
+            if pool.last_updated_slot == 0 {
+                continue;
+            }
+            // Skip ConstantProduct pools with zero reserves — vault balance not fetched yet.
+            if let PoolMath::ConstantProduct { reserve_a, reserve_b, .. } = &pool.math {
+                if *reserve_a == 0 && *reserve_b == 0 {
+                    continue;
+                }
+            }
+            // Skip CLMM pools with empty tick_arrays — not dead, just not loaded yet.
+            if pool.dex_type == DexType::RaydiumClmm {
+                if let PoolMath::Concentrated { tick_arrays, .. } = &pool.math {
+                    if tick_arrays.is_empty() {
+                        continue;
                     }
                 }
+            }
+            if self.graph.is_pool_dead(i as u32) {
                 dead_pools.push(i as u32);
             }
         }
