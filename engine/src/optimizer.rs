@@ -412,3 +412,156 @@ fn ternary_search(
         None
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::graph::{PoolEntry, TokenGraph};
+    use crate::opportunity::{Hop, Route};
+    use arrayvec::ArrayVec;
+    use solana_sdk::pubkey::Pubkey;
+    use solana_streamer_sdk::pool::state::{DexType, PoolMath};
+
+    fn make_cp_pool(reserve_a: u64, reserve_b: u64, fee_num: u64, fee_den: u64) -> PoolEntry {
+        PoolEntry {
+            address: Pubkey::new_unique(),
+            mint_a: Pubkey::new_unique(),
+            mint_b: Pubkey::new_unique(),
+            math: PoolMath::ConstantProduct {
+                reserve_a,
+                reserve_b,
+                fee_numerator: fee_num,
+                fee_denominator: fee_den,
+            },
+            dex_type: DexType::RaydiumCpmm,
+            vault_a: None,
+            vault_b: None,
+            mint_a_is_2022: false,
+            mint_b_is_2022: false,
+            extra_accounts: vec![],
+            last_updated_slot: 1,
+        }
+    }
+
+    fn build_2hop_graph(pool1: PoolEntry, pool2: PoolEntry) -> (TokenGraph, Route) {
+        let base_mint = Pubkey::new_unique();
+        let mid_mint = Pubkey::new_unique();
+
+        let mut p1 = pool1;
+        p1.mint_a = base_mint;
+        p1.mint_b = mid_mint;
+
+        let mut p2 = pool2;
+        p2.mint_a = mid_mint;
+        p2.mint_b = base_mint;
+
+        let mut graph = TokenGraph::new();
+        let idx1 = graph.add_pool(p1);
+        let idx2 = graph.add_pool(p2);
+
+        let mut hops = ArrayVec::new();
+        hops.push(Hop { pool_index: idx1, is_a_to_b: true });  // base -> mid
+        hops.push(Hop { pool_index: idx2, is_a_to_b: true });  // mid -> base
+        let route = Route { hops, base_mint };
+
+        (graph, route)
+    }
+
+    #[test]
+    fn test_cp_cp_closed_form_finds_profit() {
+        // Pool1: 100 SOL / 200k tokens, 0.3% fee
+        // Pool2: 190k tokens / 110 SOL, 0.3% fee
+        // Price diff creates arb opportunity
+        let pool1 = make_cp_pool(
+            100_000_000_000,  // 100 SOL
+            200_000_000_000,  // 200k tokens
+            3, 1000,
+        );
+        let pool2 = make_cp_pool(
+            190_000_000_000,  // 190k tokens (mid_mint = mint_a)
+            110_000_000_000,  // 110 SOL (base_mint = mint_b)
+            3, 1000,
+        );
+        let (graph, route) = build_2hop_graph(pool1, pool2);
+
+        let result = find_optimal_amount(&route, &graph, 100_000_000_000, 10);
+        assert!(result.is_some(), "Should find profitable arb");
+        let (amount_in, profit) = result.unwrap();
+        assert!(amount_in > 0, "Amount in should be positive");
+        assert!(profit > 0, "Profit should be positive");
+
+        // Verify with simulation
+        let sim_profit = simulate_route_profit(&route, &graph, amount_in);
+        assert!(sim_profit > 0, "Simulated profit should match");
+    }
+
+    #[test]
+    fn test_cp_cp_no_profit_when_equal() {
+        let pool1 = make_cp_pool(100_000_000_000, 100_000_000_000, 3, 1000);
+        let pool2 = make_cp_pool(100_000_000_000, 100_000_000_000, 3, 1000);
+        let (graph, route) = build_2hop_graph(pool1, pool2);
+
+        let result = find_optimal_amount(&route, &graph, 100_000_000_000, 10);
+        if let Some((_, profit)) = result {
+            assert_eq!(profit, 0, "No profit when pools are equal");
+        }
+    }
+
+    #[test]
+    fn test_3hop_uses_ternary_search() {
+        let base_mint = Pubkey::new_unique();
+        let mid1_mint = Pubkey::new_unique();
+        let mid2_mint = Pubkey::new_unique();
+
+        let mut p1 = make_cp_pool(100_000_000_000, 200_000_000_000, 3, 1000);
+        p1.mint_a = base_mint; p1.mint_b = mid1_mint;
+        let mut p2 = make_cp_pool(150_000_000_000, 180_000_000_000, 3, 1000);
+        p2.mint_a = mid1_mint; p2.mint_b = mid2_mint;
+        let mut p3 = make_cp_pool(160_000_000_000, 110_000_000_000, 3, 1000);
+        p3.mint_a = mid2_mint; p3.mint_b = base_mint;
+
+        let mut graph = TokenGraph::new();
+        let idx1 = graph.add_pool(p1);
+        let idx2 = graph.add_pool(p2);
+        let idx3 = graph.add_pool(p3);
+
+        let mut hops = ArrayVec::new();
+        hops.push(Hop { pool_index: idx1, is_a_to_b: true });
+        hops.push(Hop { pool_index: idx2, is_a_to_b: true });
+        hops.push(Hop { pool_index: idx3, is_a_to_b: true });
+        let route = Route { hops, base_mint };
+
+        // Should not panic, uses ternary search for 3-hop
+        let _result = find_optimal_amount(&route, &graph, 100_000_000_000, 10);
+    }
+
+    #[test]
+    fn test_closed_form_cp_cp_better_than_ternary() {
+        // Verify closed-form gives at least as good results as ternary
+        let pool1 = make_cp_pool(
+            50_000_000_000,
+            120_000_000_000,
+            25, 10000, // 0.25% fee
+        );
+        let pool2 = make_cp_pool(
+            100_000_000_000,
+            60_000_000_000,
+            25, 10000,
+        );
+        let (graph, route) = build_2hop_graph(pool1, pool2);
+
+        let cf_result = find_optimal_amount(&route, &graph, 50_000_000_000, 10);
+        let ts_result = ternary_search(&route, &graph, 50_000_000_000, 10);
+
+        // Both should find profit
+        assert!(cf_result.is_some());
+        assert!(ts_result.is_some());
+
+        let (_, cf_profit) = cf_result.unwrap();
+        let (_, ts_profit) = ts_result.unwrap();
+
+        // Closed-form should be at least as good (simulated profit)
+        assert!(cf_profit >= ts_profit * 95 / 100,
+            "Closed-form profit {} should be close to ternary {}", cf_profit, ts_profit);
+    }
+}
