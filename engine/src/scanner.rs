@@ -231,10 +231,15 @@ impl Scanner {
             }
         }
 
-        // Count pools by type and CLMM readiness
+        // Count pools by DEX type
+        let mut dex_counts = [0usize; 7]; // indexed by DexType repr
         let mut clmm_ready = 0usize;
         let mut clmm_not_ready = 0usize;
         for pool in &self.graph.pools {
+            let idx = pool.dex_type as usize;
+            if idx < dex_counts.len() {
+                dex_counts[idx] += 1;
+            }
             if pool.dex_type == DexType::RaydiumClmm {
                 if let PoolMath::Concentrated { tick_arrays, .. } = &pool.math {
                     if tick_arrays.is_empty() { clmm_not_ready += 1; } else { clmm_ready += 1; }
@@ -244,14 +249,15 @@ impl Scanner {
 
         let elapsed = start.elapsed();
         info!(
-            "Full scan: {} routes, {} probe+, {} opps in {:?} | CLMM: {}/{} ready | pools: {}",
+            "Full scan: {} routes, {} probe+, {} opps in {:?} | pools: {} [AmmV4:{} CPMM:{} CLMM:{}/{} PumpFun:{} PumpSwap:{} Bonk:{} Meteora:{}]",
             routes.len(),
             probe_passed,
             opportunities,
             elapsed,
-            clmm_ready,
-            clmm_ready + clmm_not_ready,
             self.graph.pool_count(),
+            dex_counts[0], dex_counts[1],
+            clmm_ready, clmm_ready + clmm_not_ready,
+            dex_counts[3], dex_counts[4], dex_counts[5], dex_counts[6],
         );
     }
 

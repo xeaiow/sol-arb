@@ -132,6 +132,7 @@ impl Executor {
                 }
             }
 
+            let t_start = std::time::Instant::now();
             let pair = self.tx_builder.build(&opp, &self.payer, recent_blockhash);
 
             {
@@ -153,16 +154,24 @@ impl Executor {
 
             // Test mode: send and wait, then exit
             if self.tx_builder.test_mode {
+                let build_us = t_start.elapsed().as_micros();
                 let sender = self.multi_sender.clone();
+                let t_send = std::time::Instant::now();
                 sender.send_all(&pair).await;
+                let send_us = t_send.elapsed().as_micros();
+                info!("⏱️ build={}µs, send={}µs, total={}µs", build_us, send_us, build_us + send_us);
                 info!("Test mode: first opportunity sent, exiting.");
                 break;
             }
 
             // Fire-and-forget: don't block the loop waiting for network responses
             let sender = self.multi_sender.clone();
+            let build_us = t_start.elapsed().as_micros();
             tokio::spawn(async move {
+                let t_send = std::time::Instant::now();
                 sender.send_all(&pair).await;
+                let send_us = t_send.elapsed().as_micros();
+                info!("⏱️ build={}µs, send={}µs, total={}µs", build_us, send_us, build_us + send_us);
             });
         }
     }
