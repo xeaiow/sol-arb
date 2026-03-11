@@ -41,9 +41,9 @@ const PUMPFUN_FEE_PROGRAM: Pubkey = solana_sdk::pubkey!("pfeeUxB6jkeY1Hxd7CsFCAj
 
 // ── PumpSwap constants ──
 /// PumpSwap global config (singleton, well-known)
-const PUMPSWAP_GLOBAL_CONFIG: Pubkey = solana_sdk::pubkey!("ADyA8hdefbFUWVfrRxCDdvo7EhBYic9nCR4jBdMZxW8R");
+const PUMPSWAP_GLOBAL_CONFIG: Pubkey = solana_sdk::pubkey!("ADyA8hdefvWN2dbGGWFotbzWxrAvLW83WG6QCVXvJKqw");
 /// PumpSwap protocol fee recipient
-const PUMPSWAP_PROTOCOL_FEE_RECIPIENT: Pubkey = solana_sdk::pubkey!("62qc2CNXwrYqQScmEdiZFFAnJR262PxxUZLtQ3iEQFhg");
+const PUMPSWAP_PROTOCOL_FEE_RECIPIENT: Pubkey = solana_sdk::pubkey!("62qc2CNXwrYqQScmEdiZFFAnJR262PxWEuNQtxfafNgV");
 /// PumpSwap fee program (same as PumpFun)
 const PUMPSWAP_FEE_PROGRAM: Pubkey = solana_sdk::pubkey!("pfeeUxB6jkeY1Hxd7CsFCAjcbHA9rWtchMGdZ6VojVZ");
 
