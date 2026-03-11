@@ -150,6 +150,11 @@ impl Scanner {
         // Collect indices to avoid borrow conflict
         let indices: Vec<u32> = route_indices.to_vec();
 
+        if !indices.is_empty() {
+            debug!("Incremental scan: pool {} triggered {} routes (slot {})",
+                pool_index, indices.len(), slot);
+        }
+
         for route_idx in indices {
             let route = self.route_table.routes[route_idx as usize].clone();
             self.evaluate_route(&route, slot);
@@ -263,6 +268,8 @@ impl Scanner {
 
     /// Evaluate a single route. Returns true if an Opportunity was emitted.
     fn evaluate_route(&mut self, route: &Route, slot: u64) -> bool {
+        let rk = route_key(route);
+
         // Quick probe
         let probe_profit = optimizer::simulate_route_profit(
             route,
@@ -280,18 +287,24 @@ impl Scanner {
             self.config.max_input_lamports,
             self.config.ternary_iterations,
         ) else {
+            debug!("Route {:?} probe_profit={} but ternary failed (slot {})",
+                rk.0, probe_profit, slot);
             return false;
         };
 
         if profit < self.config.min_profit_lamports {
+            debug!("Route {:?} profit={} < min={} (slot {})",
+                rk.0, profit, self.config.min_profit_lamports, slot);
             return false;
         }
 
         // --- Dedup: skip if same route was recently emitted with >= profit ---
-        let key = route_key(route);
+        let key = rk;
         if let Some(&(prev_slot, prev_profit)) = self.recent_emissions.get(&key) {
             // Same slot or next slot: only re-emit if profit increased by >10%
             if slot <= prev_slot + 1 && profit <= prev_profit + prev_profit / 10 {
+                debug!("Route {:?} dedup: profit={} vs prev={} (slot {} vs {})",
+                    key.0, profit, prev_profit, slot, prev_slot);
                 return false;
             }
         }

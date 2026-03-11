@@ -263,6 +263,49 @@ impl PoolStreamer {
         );
     }
 
+    /// Process pending tick array reload requests (call periodically from main loop).
+    /// Fetches new tick arrays for CLMM pools where tick_current moved out of range.
+    pub async fn flush_tick_reloads(&self) {
+        let requests = self.cache.drain_tick_reload_requests().await;
+        if requests.is_empty() {
+            return;
+        }
+
+        for req in requests {
+            let start_indices =
+                decoder::raydium_clmm::tick_array_start_indices(req.tick_current, req.tick_spacing);
+            let mut new_tick_arrays = Vec::with_capacity(3);
+            let mut pending = self.pending_subscriptions.lock().await;
+
+            for start_index in start_indices {
+                if let Some(pda) = decoder::raydium_clmm::tick_array_pda(&req.pool_address, start_index) {
+                    // Register mapping regardless of fetch success (for future gRPC updates)
+                    self.cache.register_tick_array(pda, req.pool_address);
+                    pending.push(pda.to_string());
+
+                    match self.rpc.get_account_data(&pda).await {
+                        Ok(ta_data) => {
+                            if let Some(ta) = decoder::raydium_clmm::decode_tick_array(&ta_data) {
+                                new_tick_arrays.push(ta);
+                            }
+                        }
+                        Err(e) => {
+                            debug!("Tick array reload fetch err for {}: {}", pda, e);
+                        }
+                    }
+                }
+            }
+
+            if !new_tick_arrays.is_empty() {
+                info!(
+                    "CLMM {} tick array reload: {} loaded (tick={})",
+                    req.pool_address, new_tick_arrays.len(), req.tick_current
+                );
+                self.cache.replace_tick_arrays(&req.pool_address, new_tick_arrays, 0);
+            }
+        }
+    }
+
     /// Drain pending subscription addresses (call before update_subscription)
     pub async fn drain_pending_subscriptions(&self) -> Vec<String> {
         let mut pending = self.pending_subscriptions.lock().await;

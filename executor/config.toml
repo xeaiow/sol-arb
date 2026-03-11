@@ -3,7 +3,7 @@ keypair_path = "~/.config/solana/id.json"
 rpc_url = "https://mainnet.helius-rpc.com/?api-key=89ed37ec-971c-48e0-99db-921d568354e6"
 grpc_endpoint = "https://solana-yellowstone-grpc.publicnode.com:443"
 grpc_token = "a8be362b3dad184ed061a9b23a11b180d1551146c82f60c0ae12ffaf51b66a55"
-log_level = "info"
+log_level = "info,arb_engine::scanner=debug"
 
 [engine]
 max_hops = 3
@@ -12,7 +12,7 @@ warmup_pool_count = 1000
 full_scan_interval_secs = 5
 min_reserve_sol = 0.1
 max_hop_fee = 0.02
-min_profit_sol = 0.00001
+min_profit_sol = 0.0001
 max_input_sol = 100.0
 ternary_iterations = 10
 probe_amount_sol = 1.0

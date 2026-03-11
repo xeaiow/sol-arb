@@ -3,6 +3,13 @@ use solana_sdk::pubkey::Pubkey;
 use tokio::sync::mpsc;
 use super::state::{PoolMath, PoolState, PoolUpdate, TickArray};
 
+/// Request to reload tick arrays for a CLMM pool whose tick moved out of range.
+pub struct TickArrayReloadRequest {
+    pub pool_address: Pubkey,
+    pub tick_current: i32,
+    pub tick_spacing: u16,
+}
+
 /// Thread-safe pool state cache with vault reverse index.
 pub struct PoolStateCache {
     /// Main pool storage: pool address → PoolState
@@ -13,6 +20,8 @@ pub struct PoolStateCache {
     tick_array_to_pool: DashMap<Pubkey, Pubkey>,
     /// Channel to emit updates to downstream consumers
     update_tx: mpsc::Sender<PoolUpdate>,
+    /// Queue of CLMM pools that need tick array reload
+    tick_reload_queue: tokio::sync::Mutex<Vec<TickArrayReloadRequest>>,
 }
 
 impl PoolStateCache {
@@ -23,6 +32,7 @@ impl PoolStateCache {
             vault_to_pool: DashMap::new(),
             tick_array_to_pool: DashMap::new(),
             update_tx,
+            tick_reload_queue: tokio::sync::Mutex::new(Vec::new()),
         }
     }
 
@@ -72,25 +82,60 @@ impl PoolStateCache {
 
     /// Update pool math and emit a PoolUpdate downstream.
     /// For CLMM pools, preserves existing tick_arrays (they come from separate accounts).
+    /// If tick_current moved outside the loaded tick array range, queues a reload request.
     pub fn update_math(&self, address: &Pubkey, math: PoolMath, slot: u64) {
         if let Some(mut pool) = self.pools.get_mut(address) {
             // For CLMM: preserve tick_arrays and fee_rate from existing state,
             // because the new math from decode has tick_arrays=[] and fee_rate=0.
+            let mut needs_tick_reload = false;
             let math = if let (
-                PoolMath::Concentrated { tick_arrays: ref existing_ta, fee_rate: existing_fee, .. },
+                PoolMath::Concentrated { tick_arrays: ref existing_ta, fee_rate: existing_fee, tick_current: old_tick, tick_spacing: _old_spacing, .. },
                 PoolMath::Concentrated { sqrt_price_x64, liquidity, tick_current, tick_spacing, tick_arrays: ref new_ta, fee_rate: new_fee },
             ) = (&pool.math, &math) {
+                let tick_arrays = if new_ta.is_empty() { existing_ta.clone() } else { new_ta.clone() };
+
+                // Check if tick_current moved outside the loaded tick array range
+                if !tick_arrays.is_empty() && *tick_current != *old_tick {
+                    let covered = tick_arrays.iter().any(|ta| {
+                        let ta_end = ta.start_tick_index + *tick_spacing as i32 * 60;
+                        *tick_current >= ta.start_tick_index && *tick_current < ta_end
+                    });
+                    if !covered {
+                        needs_tick_reload = true;
+                    }
+                }
+
                 PoolMath::Concentrated {
                     sqrt_price_x64: *sqrt_price_x64,
                     liquidity: *liquidity,
                     tick_current: *tick_current,
                     tick_spacing: *tick_spacing,
                     fee_rate: if *new_fee != 0 { *new_fee } else { *existing_fee },
-                    tick_arrays: if new_ta.is_empty() { existing_ta.clone() } else { new_ta.clone() },
+                    tick_arrays,
                 }
             } else {
                 math
             };
+
+            // Queue tick reload if needed (before updating pool, to capture new tick_current)
+            if needs_tick_reload {
+                if let PoolMath::Concentrated { tick_current, tick_spacing, .. } = &math {
+                    log::debug!("CLMM {} tick moved out of range (tick={}), queuing tick array reload",
+                        address, tick_current);
+                    // Use try_lock to avoid blocking — if locked, skip (next update will catch it)
+                    if let Ok(mut queue) = self.tick_reload_queue.try_lock() {
+                        // Don't queue duplicates
+                        if !queue.iter().any(|r| r.pool_address == *address) {
+                            queue.push(TickArrayReloadRequest {
+                                pool_address: *address,
+                                tick_current: *tick_current,
+                                tick_spacing: *tick_spacing,
+                            });
+                        }
+                    }
+                }
+            }
+
             pool.math = math.clone();
             pool.last_updated_slot = slot;
 
@@ -215,6 +260,37 @@ impl PoolStateCache {
                 } else {
                     tick_arrays.push(new_tick_array);
                 }
+                pool.last_updated_slot = slot;
+
+                let update = PoolUpdate {
+                    pool_address: pool.address,
+                    dex_type: pool.dex_type,
+                    mint_a: pool.mint_a,
+                    mint_b: pool.mint_b,
+                    vault_a: pool.vault_a,
+                    vault_b: pool.vault_b,
+                    mint_a_is_2022: pool.mint_a_is_2022,
+                    mint_b_is_2022: pool.mint_b_is_2022,
+                    extra_accounts: pool.extra_accounts.clone(),
+                    math: pool.math.clone(),
+                    slot,
+                };
+                let _ = self.update_tx.try_send(update);
+            }
+        }
+    }
+
+    /// Drain pending tick array reload requests.
+    pub async fn drain_tick_reload_requests(&self) -> Vec<TickArrayReloadRequest> {
+        let mut queue = self.tick_reload_queue.lock().await;
+        std::mem::take(&mut *queue)
+    }
+
+    /// Replace tick arrays for a CLMM pool and emit a PoolUpdate.
+    pub fn replace_tick_arrays(&self, address: &Pubkey, new_tick_arrays: Vec<TickArray>, slot: u64) {
+        if let Some(mut pool) = self.pools.get_mut(address) {
+            if let PoolMath::Concentrated { ref mut tick_arrays, .. } = pool.math {
+                *tick_arrays = new_tick_arrays;
                 pool.last_updated_slot = slot;
 
                 let update = PoolUpdate {

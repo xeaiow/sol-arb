@@ -34,13 +34,13 @@ async fn main() -> anyhow::Result<()> {
         .unwrap_or_else(|_| "config.toml".to_string());
     let executor_config = ExecutorConfigFile::load(&config_path)?;
 
-    // 從 config 設定 log level (若環境變數未設定)
-    if std::env::var("RUST_LOG").is_err() {
-        let level = executor_config.general.as_ref()
-            .and_then(|g| g.log_level.clone())
-            .unwrap_or_else(|| "info".to_string());
-        std::env::set_var("RUST_LOG", &level);
-    }
+    // config.toml log_level 優先，RUST_LOG 環境變數為 fallback
+    let level = executor_config.general.as_ref()
+        .and_then(|g| g.log_level.clone())
+        .unwrap_or_else(|| {
+            std::env::var("RUST_LOG").unwrap_or_else(|_| "info".to_string())
+        });
+    std::env::set_var("RUST_LOG", &level);
     env_logger::init();
 
     eprintln!("Config loaded: {}", config_path);
@@ -154,13 +154,14 @@ async fn main() -> anyhow::Result<()> {
     eprintln!("\n=== Pipeline running. Warming up... ===");
     eprintln!("(Press Ctrl-C to stop)\n");
 
-    // ── Vault balance fetcher: batch RPC every 2 seconds ──
+    // ── Vault balance fetcher + tick array reloader: batch RPC every 2 seconds ──
     let vault_streamer = pool_streamer.clone();
     let vault_fetcher = async move {
         let mut interval = tokio::time::interval(std::time::Duration::from_secs(2));
         loop {
             interval.tick().await;
             vault_streamer.flush_pending_vaults().await;
+            vault_streamer.flush_tick_reloads().await;
         }
     };
 
