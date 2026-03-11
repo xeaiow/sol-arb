@@ -161,7 +161,8 @@ impl Scanner {
         }
     }
 
-    /// Full scan: prune dead pools, then evaluate all routes
+    /// Periodic maintenance: prune dead pools, reset dedup, log stats.
+    /// Route evaluation is fully handled by incremental scan on each pool update.
     fn full_scan(&mut self) {
         let start = Instant::now();
 
@@ -170,17 +171,14 @@ impl Scanner {
         let mut dead_pools: Vec<u32> = Vec::new();
         for i in 0..pool_count {
             let pool = &self.graph.pools[i];
-            // Skip pools that haven't received any update yet.
             if pool.last_updated_slot == 0 {
                 continue;
             }
-            // Skip ConstantProduct pools with zero reserves — vault balance not fetched yet.
             if let PoolMath::ConstantProduct { reserve_a, reserve_b, .. } = &pool.math {
                 if *reserve_a == 0 && *reserve_b == 0 {
                     continue;
                 }
             }
-            // Skip CLMM pools with empty tick_arrays — not dead, just not loaded yet.
             if pool.dex_type == DexType::RaydiumClmm {
                 if let PoolMath::Concentrated { tick_arrays, .. } = &pool.math {
                     if tick_arrays.is_empty() {
@@ -197,12 +195,9 @@ impl Scanner {
             for &pi in &dead_pools {
                 self.graph.remove_pool_edges(pi);
             }
-
-            // Remove routes that reference any dead pool
             let routes_before = self.route_table.routes.len();
             self.route_table.remove_routes_with_pools(&dead_pools);
             let routes_after = self.route_table.routes.len();
-
             info!(
                 "Pruned {} dead pools, removed {} routes ({} -> {})",
                 dead_pools.len(),
@@ -212,32 +207,11 @@ impl Scanner {
             );
         }
 
-        // --- Clear dedup map each full scan (allow re-evaluation) ---
+        // --- Clear dedup map (allow re-evaluation of previously seen routes) ---
         self.recent_emissions.clear();
 
-        // --- Evaluate remaining routes ---
-        let mut opportunities = 0;
-        let mut probe_passed = 0;
-
-        let routes: Vec<Route> = self.route_table.routes.clone();
-
-        for route in &routes {
-            // Quick probe inline to count stats
-            let probe_profit = optimizer::simulate_route_profit(
-                route,
-                &self.graph,
-                self.config.probe_amount_lamports,
-            );
-            if probe_profit > 0 {
-                probe_passed += 1;
-            }
-            if self.evaluate_route(route, 0) {
-                opportunities += 1;
-            }
-        }
-
-        // Count pools by DEX type
-        let mut dex_counts = [0usize; 7]; // indexed by DexType repr
+        // --- Stats log ---
+        let mut dex_counts = [0usize; 7];
         let mut clmm_ready = 0usize;
         let mut clmm_not_ready = 0usize;
         for pool in &self.graph.pools {
@@ -254,12 +228,10 @@ impl Scanner {
 
         let elapsed = start.elapsed();
         info!(
-            "Full scan: {} routes, {} probe+, {} opps in {:?} | pools: {} [AmmV4:{} CPMM:{} CLMM:{}/{} PumpFun:{} PumpSwap:{} Bonk:{} Meteora:{}]",
-            routes.len(),
-            probe_passed,
-            opportunities,
-            elapsed,
+            "Maintenance: {} routes, {} pools in {:?} | [AmmV4:{} CPMM:{} CLMM:{}/{} PumpFun:{} PumpSwap:{} Bonk:{} Meteora:{}]",
+            self.route_table.routes.len(),
             self.graph.pool_count(),
+            elapsed,
             dex_counts[0], dex_counts[1],
             clmm_ready, clmm_ready + clmm_not_ready,
             dex_counts[3], dex_counts[4], dex_counts[5], dex_counts[6],

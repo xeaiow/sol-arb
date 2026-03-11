@@ -1,7 +1,9 @@
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
 use dashmap::DashMap;
 use log::{info, debug};
 use solana_client::nonblocking::rpc_client::RpcClient;
+use solana_sdk::hash::Hash;
 use solana_sdk::pubkey::Pubkey;
 use tokio::sync::mpsc;
 
@@ -41,6 +43,10 @@ pub struct PoolStreamer {
     pending_vaults: Arc<tokio::sync::Mutex<Vec<PendingVault>>>,
     /// Pools discovered from tx events, waiting for gRPC account data to arrive
     pending_discoveries: DashMap<Pubkey, DiscoveredPool>,
+    /// Latest blockhash from gRPC BlockMeta events
+    latest_blockhash: Arc<tokio::sync::RwLock<Option<Hash>>>,
+    /// Slot of the latest blockhash
+    latest_blockhash_slot: Arc<AtomicU64>,
 }
 
 impl PoolStreamer {
@@ -55,6 +61,8 @@ impl PoolStreamer {
             pending_subscriptions: Arc::new(tokio::sync::Mutex::new(Vec::new())),
             pending_vaults: Arc::new(tokio::sync::Mutex::new(Vec::new())),
             pending_discoveries: DashMap::new(),
+            latest_blockhash: Arc::new(tokio::sync::RwLock::new(None)),
+            latest_blockhash_slot: Arc::new(AtomicU64::new(0)),
         };
 
         (streamer, update_rx)
@@ -91,6 +99,17 @@ impl PoolStreamer {
         if let DexEvent::RaydiumClmmTickArrayStateAccountEvent(ref ta_event) = event {
             let ta = decoder::raydium_clmm::tick_array_from_state(&ta_event.tick_array_state);
             self.cache.update_tick_array(&ta_event.pubkey, ta, ta_event.metadata.slot);
+        }
+
+        // 5. Handle BlockMeta events (blockhash for executor)
+        if let DexEvent::BlockMetaEvent(ref block_event) = event {
+            if let Ok(hash) = block_event.block_hash.parse::<Hash>() {
+                let prev_slot = self.latest_blockhash_slot.load(Ordering::Relaxed);
+                if block_event.slot > prev_slot {
+                    *self.latest_blockhash.write().await = Some(hash);
+                    self.latest_blockhash_slot.store(block_event.slot, Ordering::Relaxed);
+                }
+            }
         }
     }
 
@@ -318,6 +337,17 @@ impl PoolStreamer {
 
     pub fn pending_count(&self) -> usize {
         self.pending_discoveries.len()
+    }
+
+    /// Get the latest blockhash from gRPC BlockMeta events.
+    pub async fn latest_blockhash(&self) -> Option<(Hash, u64)> {
+        let hash = self.latest_blockhash.read().await;
+        hash.map(|h| (h, self.latest_blockhash_slot.load(Ordering::Relaxed)))
+    }
+
+    /// Get a shared handle to the blockhash (for Executor to read directly).
+    pub fn latest_blockhash_handle(&self) -> Arc<tokio::sync::RwLock<Option<Hash>>> {
+        self.latest_blockhash.clone()
     }
 
     /// Batch-fetch pending vault balances via getMultipleAccounts.

@@ -1,6 +1,7 @@
 use std::sync::Arc;
 use log::{info, debug, warn};
 use solana_client::nonblocking::rpc_client::RpcClient;
+use solana_sdk::hash::Hash;
 use solana_sdk::signer::{keypair::Keypair, Signer};
 use tokio::sync::mpsc;
 
@@ -12,6 +13,9 @@ use crate::marginfi::MarginFiState;
 use crate::sender::MultiSender;
 use crate::tx_builder::TxBuilder;
 
+/// Shared blockhash provider — fed by gRPC BlockMeta events.
+pub type SharedBlockhash = Arc<tokio::sync::RwLock<Option<Hash>>>;
+
 pub struct Executor {
     _config: ExecutorConfigFile,
     tx_builder: TxBuilder,
@@ -19,6 +23,8 @@ pub struct Executor {
     opp_rx: mpsc::Receiver<Opportunity>,
     payer: Arc<Keypair>,
     rpc: Arc<RpcClient>,
+    /// gRPC-pushed blockhash (primary). Falls back to RPC if not yet available.
+    shared_blockhash: Option<SharedBlockhash>,
     #[allow(dead_code)] // Held to keep Arc alive; TxBuilder has a clone
     marginfi_state: Option<Arc<MarginFiState>>,
 }
@@ -82,8 +88,15 @@ impl Executor {
             opp_rx,
             payer: Arc::new(payer),
             rpc,
+            shared_blockhash: None,
             marginfi_state: marginfi_state,
         })
+    }
+
+    /// Set a shared blockhash from gRPC BlockMeta events.
+    /// When set, executor uses this instead of RPC polling.
+    pub fn set_shared_blockhash(&mut self, bh: SharedBlockhash) {
+        self.shared_blockhash = Some(bh);
     }
 
     pub async fn run(mut self) {
@@ -91,14 +104,22 @@ impl Executor {
 
         let mut latest_slot: u64 = 0;
 
-        let mut recent_blockhash = self
-            .rpc
-            .get_latest_blockhash()
-            .await
-            .expect("Failed to get initial blockhash");
+        // Try gRPC blockhash first, fall back to RPC
+        let mut recent_blockhash = if let Some(ref sbh) = self.shared_blockhash {
+            let bh = sbh.read().await;
+            match *bh {
+                Some(h) => h,
+                None => {
+                    info!("gRPC blockhash not yet available, falling back to RPC");
+                    self.rpc.get_latest_blockhash().await
+                        .expect("Failed to get initial blockhash")
+                }
+            }
+        } else {
+            self.rpc.get_latest_blockhash().await
+                .expect("Failed to get initial blockhash")
+        };
         let mut blockhash_slot: u64 = 0;
-        // Blockhash is valid for ~150 slots (~60s). Refresh every 100 slots for safety.
-        const BLOCKHASH_REFRESH_SLOTS: u64 = 100;
 
         loop {
             let opp = match self.opp_rx.recv().await {
@@ -119,15 +140,25 @@ impl Executor {
                 continue;
             }
 
-            // Refresh blockhash based on slot distance (not counter)
-            if latest_slot.saturating_sub(blockhash_slot) >= BLOCKHASH_REFRESH_SLOTS {
-                match self.rpc.get_latest_blockhash().await {
-                    Ok(bh) => {
-                        recent_blockhash = bh;
-                        blockhash_slot = latest_slot;
+            // Update blockhash from gRPC (no RPC needed)
+            if let Some(ref sbh) = self.shared_blockhash {
+                if let Ok(bh) = sbh.try_read() {
+                    if let Some(h) = *bh {
+                        recent_blockhash = h;
                     }
-                    Err(e) => {
-                        warn!("Failed to refresh blockhash: {}", e);
+                }
+            } else {
+                // Fallback: RPC polling every 100 slots
+                const BLOCKHASH_REFRESH_SLOTS: u64 = 100;
+                if latest_slot.saturating_sub(blockhash_slot) >= BLOCKHASH_REFRESH_SLOTS {
+                    match self.rpc.get_latest_blockhash().await {
+                        Ok(bh) => {
+                            recent_blockhash = bh;
+                            blockhash_slot = latest_slot;
+                        }
+                        Err(e) => {
+                            warn!("Failed to refresh blockhash: {}", e);
+                        }
                     }
                 }
             }

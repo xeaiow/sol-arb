@@ -9,7 +9,7 @@ log_level = "info,arb_engine::scanner=debug"
 max_hops = 3
 warmup_secs = 30
 warmup_pool_count = 1000
-full_scan_interval_secs = 5
+full_scan_interval_secs = 30
 min_reserve_sol = 0.1
 max_hop_fee = 0.02
 min_profit_sol = 0.0001

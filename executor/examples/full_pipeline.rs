@@ -95,8 +95,12 @@ async fn main() -> anyhow::Result<()> {
     eprintln!("Stage 2 (Engine) ready");
 
     // ── Stage 3: Executor ───────────────────────────────────────────────
-    let executor = Executor::new(executor_config, opp_rx, payer, &rpc_url).await?;
-    eprintln!("Stage 3 (Executor) ready");
+    let mut executor = Executor::new(executor_config, opp_rx, payer, &rpc_url).await?;
+
+    // Share blockhash from gRPC BlockMeta → Executor (eliminates RPC blockhash polling)
+    let shared_bh = pool_streamer.latest_blockhash_handle();
+    executor.set_shared_blockhash(shared_bh);
+    eprintln!("Stage 3 (Executor) ready — blockhash via gRPC");
 
     // ── Start gRPC subscription ─────────────────────────────────────────
     let grpc = Arc::new(YellowstoneGrpc::new(grpc_endpoint, grpc_token)?);
@@ -111,7 +115,7 @@ async fn main() -> anyhow::Result<()> {
         Protocol::MeteoraDammV2,
     ];
 
-    let account_include = vec![
+    let program_ids = vec![
         PUMPFUN_PROGRAM_ID.to_string(),
         PUMPSWAP_PROGRAM_ID.to_string(),
         BONK_PROGRAM_ID.to_string(),
@@ -122,14 +126,14 @@ async fn main() -> anyhow::Result<()> {
     ];
 
     let transaction_filter = TransactionFilter {
-        account_include: account_include.clone(),
+        account_include: program_ids.clone(),
         account_exclude: vec![],
         account_required: vec![],
     };
 
     let account_filter = AccountFilter {
         account: vec![],
-        owner: account_include,
+        owner: program_ids.clone(),
         filters: vec![],
     };
 
@@ -154,14 +158,70 @@ async fn main() -> anyhow::Result<()> {
     eprintln!("\n=== Pipeline running. Warming up... ===");
     eprintln!("(Press Ctrl-C to stop)\n");
 
-    // ── Vault balance fetcher + tick array reloader: batch RPC every 2 seconds ──
+    // ── gRPC subscription updater: periodically add new vault/tick array accounts ──
+    // Cumulative list of explicit account addresses for gRPC subscription
+    let sub_streamer = pool_streamer.clone();
+    let sub_grpc = grpc.clone();
+    let sub_program_ids = program_ids.clone();
+    let subscription_updater = async move {
+        let mut cumulative_accounts: Vec<String> = Vec::new();
+        let mut interval = tokio::time::interval(std::time::Duration::from_secs(2));
+        loop {
+            interval.tick().await;
+
+            // Also flush tick reloads (still needs RPC for initial data, but registers for gRPC)
+            sub_streamer.flush_tick_reloads().await;
+
+            // Drain newly discovered vault/tick array addresses
+            let new_accounts = sub_streamer.drain_pending_subscriptions().await;
+            if new_accounts.is_empty() {
+                continue;
+            }
+
+            // Add to cumulative list (dedup)
+            let before = cumulative_accounts.len();
+            for addr in &new_accounts {
+                if !cumulative_accounts.contains(addr) {
+                    cumulative_accounts.push(addr.clone());
+                }
+            }
+            let added = cumulative_accounts.len() - before;
+            if added == 0 {
+                continue;
+            }
+
+            log::info!(
+                "Updating gRPC subscription: +{} accounts (total {} explicit)",
+                added, cumulative_accounts.len()
+            );
+
+            // Update gRPC subscription with explicit accounts + owner filter
+            let tx_filter = TransactionFilter {
+                account_include: sub_program_ids.clone(),
+                account_exclude: vec![],
+                account_required: vec![],
+            };
+            let acct_filter = AccountFilter {
+                account: cumulative_accounts.clone(),
+                owner: sub_program_ids.clone(),
+                filters: vec![],
+            };
+            if let Err(e) = sub_grpc.update_subscription(
+                vec![tx_filter],
+                vec![acct_filter],
+            ).await {
+                log::warn!("Failed to update gRPC subscription: {}", e);
+            }
+        }
+    };
+
+    // ── Vault balance initial fetch (RPC fallback for vaults not yet pushed by gRPC) ──
     let vault_streamer = pool_streamer.clone();
     let vault_fetcher = async move {
         let mut interval = tokio::time::interval(std::time::Duration::from_secs(2));
         loop {
             interval.tick().await;
             vault_streamer.flush_pending_vaults().await;
-            vault_streamer.flush_tick_reloads().await;
         }
     };
 
@@ -172,6 +232,9 @@ async fn main() -> anyhow::Result<()> {
         }
         _ = executor.run() => {
             eprintln!("Executor exited");
+        }
+        _ = subscription_updater => {
+            eprintln!("Subscription updater exited");
         }
         _ = vault_fetcher => {
             eprintln!("Vault fetcher exited");
