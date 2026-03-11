@@ -105,15 +105,19 @@ impl PoolStateCache {
                     }
                 }
 
+                let fee_rate = if *new_fee != 0 { *new_fee } else { *existing_fee };
+                let (limit_a, limit_b) = super::state::compute_clmm_limits(
+                    *sqrt_price_x64, *liquidity, *tick_current, &tick_arrays,
+                );
                 PoolMath::Concentrated {
                     sqrt_price_x64: *sqrt_price_x64,
                     liquidity: *liquidity,
                     tick_current: *tick_current,
                     tick_spacing: *tick_spacing,
-                    fee_rate: if *new_fee != 0 { *new_fee } else { *existing_fee },
+                    fee_rate,
                     tick_arrays,
-                    limit_in_a: 0,
-                    limit_in_b: 0,
+                    limit_in_a: limit_a,
+                    limit_in_b: limit_b,
                 }
             } else {
                 math
@@ -262,6 +266,20 @@ impl PoolStateCache {
                 } else {
                     tick_arrays.push(new_tick_array);
                 }
+            }
+            // Recompute limits after modifying tick arrays
+            if let PoolMath::Concentrated {
+                sqrt_price_x64, liquidity, tick_current, ref tick_arrays,
+                ref mut limit_in_a, ref mut limit_in_b, ..
+            } = pool.math {
+                let (la, lb) = super::state::compute_clmm_limits(
+                    sqrt_price_x64, liquidity, tick_current, tick_arrays,
+                );
+                *limit_in_a = la;
+                *limit_in_b = lb;
+            }
+
+            if matches!(pool.math, PoolMath::Concentrated { .. }) {
                 pool.last_updated_slot = slot;
 
                 let update = PoolUpdate {
@@ -293,6 +311,20 @@ impl PoolStateCache {
         if let Some(mut pool) = self.pools.get_mut(address) {
             if let PoolMath::Concentrated { ref mut tick_arrays, .. } = pool.math {
                 *tick_arrays = new_tick_arrays;
+            }
+            // Recompute limits after replacing tick arrays
+            if let PoolMath::Concentrated {
+                sqrt_price_x64, liquidity, tick_current, ref tick_arrays,
+                ref mut limit_in_a, ref mut limit_in_b, ..
+            } = pool.math {
+                let (la, lb) = super::state::compute_clmm_limits(
+                    sqrt_price_x64, liquidity, tick_current, tick_arrays,
+                );
+                *limit_in_a = la;
+                *limit_in_b = lb;
+            }
+
+            if matches!(pool.math, PoolMath::Concentrated { .. }) {
                 pool.last_updated_slot = slot;
 
                 let update = PoolUpdate {
