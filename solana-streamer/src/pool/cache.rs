@@ -90,7 +90,7 @@ impl PoolStateCache {
             let mut needs_tick_reload = false;
             let math = if let (
                 PoolMath::Concentrated { tick_arrays: ref existing_ta, fee_rate: existing_fee, tick_current: old_tick, tick_spacing: _old_spacing, .. },
-                PoolMath::Concentrated { sqrt_price_x64, liquidity, tick_current, tick_spacing, tick_arrays: ref new_ta, fee_rate: new_fee },
+                PoolMath::Concentrated { sqrt_price_x64, liquidity, tick_current, tick_spacing, tick_arrays: ref new_ta, fee_rate: new_fee, .. },
             ) = (&pool.math, &math) {
                 let tick_arrays = if new_ta.is_empty() { existing_ta.clone() } else { new_ta.clone() };
 
@@ -112,6 +112,8 @@ impl PoolStateCache {
                     tick_spacing: *tick_spacing,
                     fee_rate: if *new_fee != 0 { *new_fee } else { *existing_fee },
                     tick_arrays,
+                    limit_in_a: 0,
+                    limit_in_b: 0,
                 }
             } else {
                 math

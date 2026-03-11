@@ -48,6 +48,10 @@ pub enum PoolMath {
         /// Pre-loaded tick arrays for accurate cross-tick quoting.
         /// Typically 3: left of current, current, right of current.
         tick_arrays: Vec<TickArray>,
+        /// Max token_a input without crossing a tick boundary
+        limit_in_a: u64,
+        /// Max token_b input without crossing a tick boundary
+        limit_in_b: u64,
     },
 
     /// Bonding curve (PumpFun)
@@ -116,6 +120,8 @@ impl PoolMath {
                 tick_spacing,
                 fee_rate,
                 tick_arrays,
+                limit_in_a: _,
+                limit_in_b: _,
             } => {
                 if *liquidity == 0 || *sqrt_price_x64 == 0 {
                     return 0;
@@ -283,6 +289,66 @@ fn clmm_get_amount_out(
 #[inline]
 fn tick_index_to_sqrt_price(tick: i32) -> f64 {
     1.0001_f64.powf(tick as f64 / 2.0)
+}
+
+/// Compute the max input amounts that stay within the current tick range.
+/// Uses the nearest initialized ticks above and below tick_current.
+pub fn compute_clmm_limits(
+    sqrt_price_x64: u128,
+    liquidity: u128,
+    tick_current: i32,
+    tick_arrays: &[TickArray],
+) -> (u64, u64) {
+    if liquidity == 0 || sqrt_price_x64 == 0 || tick_arrays.is_empty() {
+        return (0, 0);
+    }
+
+    let q64 = (1u128 << 64) as f64;
+    let sqrt_price = sqrt_price_x64 as f64 / q64;
+    let liq = liquidity as f64;
+
+    // Collect all initialized ticks
+    let mut initialized: Vec<i32> = tick_arrays
+        .iter()
+        .flat_map(|ta| ta.ticks.iter())
+        .filter(|t| t.liquidity_net != 0)
+        .map(|t| t.index)
+        .collect();
+    initialized.sort();
+
+    // Find nearest initialized tick below (or equal to) tick_current
+    let lower_tick = initialized.iter().rev()
+        .find(|&&t| t <= tick_current)
+        .copied();
+    // Find nearest initialized tick above tick_current
+    let upper_tick = initialized.iter()
+        .find(|&&t| t > tick_current)
+        .copied();
+
+    let lower_sqrt = lower_tick
+        .map(|t| tick_index_to_sqrt_price(t))
+        .unwrap_or(tick_index_to_sqrt_price(-443636));
+    let upper_sqrt = upper_tick
+        .map(|t| tick_index_to_sqrt_price(t))
+        .unwrap_or(tick_index_to_sqrt_price(443636));
+
+    // limit_in_a: max token_a to push price down to lower_sqrt
+    // delta_a = L * (1/lower_sqrt - 1/sqrt_price)
+    let limit_a = if lower_sqrt > 0.0 && lower_sqrt < sqrt_price {
+        liq * (1.0 / lower_sqrt - 1.0 / sqrt_price)
+    } else {
+        0.0
+    };
+
+    // limit_in_b: max token_b to push price up to upper_sqrt
+    // delta_b = L * (upper_sqrt - sqrt_price)
+    let limit_b = if upper_sqrt > sqrt_price {
+        liq * (upper_sqrt - sqrt_price)
+    } else {
+        0.0
+    };
+
+    (limit_a.max(0.0) as u64, limit_b.max(0.0) as u64)
 }
 
 /// Unified pool state

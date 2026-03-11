@@ -44,6 +44,8 @@ fn from_pool_state(address: &Pubkey, ps: &ClmmPoolState, slot: u64) -> PoolState
             tick_spacing: ps.tick_spacing,
             fee_rate: 0, // patched from AmmConfig in streamer
             tick_arrays: vec![], // loaded in streamer via RPC
+            limit_in_a: 0,
+            limit_in_b: 0,
         },
         last_updated_slot: slot,
     }
