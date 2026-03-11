@@ -59,17 +59,8 @@ const ATA_PROGRAM_ID: Pubkey = solana_sdk::pubkey!("ATokenGPvbdGVxr1b2hvZbsiqW5x
 /// System program ID
 const SYSTEM_PROGRAM_ID: Pubkey = solana_sdk::pubkey!("11111111111111111111111111111111");
 
-/// Astralane tip accounts (transactions must include a SOL transfer to one of these)
-const ASTRALANE_TIP_ACCOUNTS: [Pubkey; 8] = [
-    solana_sdk::pubkey!("astrazznxsGUhWShqgNtAdfrzP2G83DzcWVJDxwV9bF"),
-    solana_sdk::pubkey!("astra4uejePWneqNaJKuFFA8oonqCE1sqF6b45kDMZm"),
-    solana_sdk::pubkey!("astra9xWY93QyfG6yM8zwsKsRodscjQ2uU2HKNL5prk"),
-    solana_sdk::pubkey!("astraRVUuTHjpwEVvNBeQEgwYx9w9CFyfxjYoobCZhL"),
-    solana_sdk::pubkey!("astraEJ2fEj8Xmy6KLG7B3VfbKfsHXhHrNdCQx7iGJK"),
-    solana_sdk::pubkey!("astraubkDw81n4LuutzSQ8uzHCv4BhPVhfvTcYv8SKC"),
-    solana_sdk::pubkey!("astraZW5GLFefxNPAatceHhYjfA1ciq9gvfEg2S47xk"),
-    solana_sdk::pubkey!("astrawVNP4xDBKT7rAdxrLYiTSTdqtUr63fSMduivXK"),
-];
+/// Astralane tip account
+const ASTRALANE_TIP_ACCOUNT: Pubkey = solana_sdk::pubkey!("astra4uejePWneqNaJKuFFA8oonqCE1sqF6b45kDMZm");
 
 /// Derive an Associated Token Account address (PDA)
 fn derive_ata(owner: &Pubkey, mint: &Pubkey) -> Pubkey {
@@ -229,9 +220,6 @@ impl TxBuilder {
             let cu_price = self.calculate_cu_price(opp.expected_profit, base_cu);
             // Astralane requires a SOL transfer tip (min 10000 lamports = 0.00001 SOL)
             let astralane_tip: u64 = 10_000;
-            let tip_account = ASTRALANE_TIP_ACCOUNTS[
-                rand::random::<usize>() % ASTRALANE_TIP_ACCOUNTS.len()
-            ];
             let mut ixs = vec![
                 ComputeBudgetInstruction::set_compute_unit_limit(cu_limit),
                 ComputeBudgetInstruction::set_compute_unit_price(cu_price),
@@ -246,7 +234,7 @@ impl TxBuilder {
                 ixs.push(fl.repay.clone());
                 ixs.push(fl.end.clone());
             }
-            ixs.push(system_instruction::transfer(&payer.pubkey(), &tip_account, astralane_tip));
+            ixs.push(system_instruction::transfer(&payer.pubkey(), &ASTRALANE_TIP_ACCOUNT, astralane_tip));
             Some(ixs)
         } else {
             None

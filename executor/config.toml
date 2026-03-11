@@ -12,7 +12,7 @@ warmup_pool_count = 1000
 full_scan_interval_secs = 5
 min_reserve_sol = 0.1
 max_hop_fee = 0.02
-min_profit_sol = 0.0001
+min_profit_sol = 0.00001
 max_input_sol = 100.0
 ternary_iterations = 10
 probe_amount_sol = 1.0
@@ -21,7 +21,7 @@ probe_amount_sol = 1.0
 [executor]
 flashloan_enabled = true
 program_id = "8NwGVcMu96JTJwfUKQNXjYMd87JyGWcPkaENe9NPzLCV"
-alt_address = "FNFedTyPSj8b8SQwx6ujyKVVMeP4dXivWa4HDMKqgAfG"
+alt_address = "Eppmrwxw2nY6PbKdG8ANUA3EarHJSoXpfDa2u4euCyWu"
 
 [executor.anti_fingerprint]
 cu_jitter_range = 1000
