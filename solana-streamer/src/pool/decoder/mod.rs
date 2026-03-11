@@ -21,6 +21,7 @@ pub fn pool_state_from_event(event: &DexEvent) -> Option<PoolState> {
         DexEvent::PumpFunBondingCurveAccountEvent(e) => pumpfun::decode(e),
         DexEvent::PumpSwapPoolAccountEvent(e) => pumpswap::decode(e),
         DexEvent::BonkPoolStateAccountEvent(e) => bonk::decode(e),
+        DexEvent::MeteoraDammV2PoolStateAccountEvent(e) => meteora_damm_v2::decode(e),
         _ => None,
     }
 }

@@ -408,6 +408,27 @@ pub fn meteora_damm_v2_swap_event_decode(data: &[u8]) -> Option<MeteoraDammV2Swa
     borsh::from_slice::<MeteoraDammV2SwapEvent>(&data[..METEORA_DAMM_V2_SWAP_EVENT_LOG_SIZE]).ok()
 }
 
+/// Meteora DAMM v2 Pool account event (from gRPC account subscription)
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct MeteoraDammV2PoolStateAccountEvent {
+    pub metadata: EventMetadata,
+    pub pubkey: Pubkey,
+    pub token_a_mint: Pubkey,
+    pub token_b_mint: Pubkey,
+    pub token_a_vault: Pubkey,
+    pub token_b_vault: Pubkey,
+    pub token_a_flag: u8,
+    pub token_b_flag: u8,
+    pub pool_status: u8,
+    pub cliff_fee_numerator: u64,
+}
+
+/// Pool account discriminator
+pub const METEORA_DAMM_V2_POOL_DISCRIMINATOR: &[u8] = &[241, 154, 109, 4, 17, 177, 109, 188];
+
+/// Minimum pool account data size (8 disc + 1104 struct)
+pub const METEORA_DAMM_V2_POOL_ACCOUNT_SIZE: usize = 1112;
+
 /// Decode initialize pool event from CPI log
 /// Note: discriminator (16 bytes) is already removed by the caller
 pub fn meteora_damm_v2_initialize_pool_event_decode(

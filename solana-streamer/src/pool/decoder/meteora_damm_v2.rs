@@ -1,32 +1,63 @@
 use solana_sdk::pubkey::Pubkey;
 
 use crate::pool::state::{DexType, PoolMath, PoolState};
+use crate::streaming::event_parser::protocols::meteora_damm_v2::events::MeteoraDammV2PoolStateAccountEvent;
 
-/// Meteora DAMM v2 has no existing account event parser, so there is no
-/// `decode()` from events. Only raw byte decoding is supported.
+/// Fee denominator for Meteora DAMM V2 (cliff_fee_numerator / FEE_DENOMINATOR = fee rate)
+const FEE_DENOMINATOR: u64 = 1_000_000_000;
+
+/// Decode from a parsed account event
+pub fn decode(event: &MeteoraDammV2PoolStateAccountEvent) -> Option<PoolState> {
+    Some(PoolState {
+        address: event.pubkey,
+        dex_type: DexType::MeteoraDammV2,
+        mint_a: event.token_a_mint,
+        mint_b: event.token_b_mint,
+        vault_a: Some(event.token_a_vault),
+        vault_b: Some(event.token_b_vault),
+        mint_a_is_2022: (event.token_a_flag & 1) != 0,
+        mint_b_is_2022: (event.token_b_flag & 1) != 0,
+        extra_accounts: vec![],
+        math: PoolMath::ConstantProduct {
+            reserve_a: 0,
+            reserve_b: 0,
+            fee_numerator: event.cliff_fee_numerator,
+            fee_denominator: FEE_DENOMINATOR,
+        },
+        last_updated_slot: event.metadata.slot,
+    })
+}
 
 /// Decode from raw account bytes.
 ///
 /// Layout (after 8-byte Anchor discriminator):
-///   lp_mint:       Pubkey (32)
-///   token_a_mint:  Pubkey (32)
-///   token_b_mint:  Pubkey (32)
-///   a_vault:       Pubkey (32)
-///   b_vault:       Pubkey (32)
+///   pool_fees:     PoolFeesStruct (160 bytes)
+///     - base_fee_info.data[0..8] = cliff_fee_numerator (u64 LE)
+///   token_a_mint:  Pubkey (32)  offset 168
+///   token_b_mint:  Pubkey (32)  offset 200
+///   token_a_vault: Pubkey (32)  offset 232
+///   token_b_vault: Pubkey (32)  offset 264
+///   ...
+///   pool_status:   u8           offset 481
+///   token_a_flag:  u8           offset 482
+///   token_b_flag:  u8           offset 483
 ///
-/// Total minimum: 8 + 5*32 = 168 bytes
+/// Total minimum: 8 + 484 = 492 bytes (up to token_b_flag)
 pub fn decode_bytes(address: &Pubkey, data: &[u8]) -> Option<PoolState> {
-    const MIN_SIZE: usize = 8 + 32 * 5;
-    if data.len() < MIN_SIZE {
+    if data.len() < 484 {
         return None;
     }
 
-    let offset = 8; // skip discriminator
-    // skip lp_mint (32 bytes)
-    let token_a_mint = Pubkey::try_from(&data[offset + 32..offset + 64]).ok()?;
-    let token_b_mint = Pubkey::try_from(&data[offset + 64..offset + 96]).ok()?;
-    let a_vault = Pubkey::try_from(&data[offset + 96..offset + 128]).ok()?;
-    let b_vault = Pubkey::try_from(&data[offset + 128..offset + 160]).ok()?;
+    // cliff_fee_numerator: first 8 bytes of base_fee_info.data (offset 8)
+    let cliff_fee_numerator = u64::from_le_bytes(data[8..16].try_into().ok()?);
+
+    let token_a_mint = Pubkey::try_from(&data[168..200]).ok()?;
+    let token_b_mint = Pubkey::try_from(&data[200..232]).ok()?;
+    let a_vault = Pubkey::try_from(&data[232..264]).ok()?;
+    let b_vault = Pubkey::try_from(&data[264..296]).ok()?;
+
+    let token_a_flag = data[482];
+    let token_b_flag = data[483];
 
     Some(PoolState {
         address: *address,
@@ -35,14 +66,14 @@ pub fn decode_bytes(address: &Pubkey, data: &[u8]) -> Option<PoolState> {
         mint_b: token_b_mint,
         vault_a: Some(a_vault),
         vault_b: Some(b_vault),
-        mint_a_is_2022: false,
-        mint_b_is_2022: false,
+        mint_a_is_2022: (token_a_flag & 1) != 0,
+        mint_b_is_2022: (token_b_flag & 1) != 0,
         extra_accounts: vec![],
         math: PoolMath::ConstantProduct {
             reserve_a: 0,
             reserve_b: 0,
-            fee_numerator: 25,
-            fee_denominator: 10000,
+            fee_numerator: cliff_fee_numerator,
+            fee_denominator: FEE_DENOMINATOR,
         },
         last_updated_slot: 0,
     })

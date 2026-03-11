@@ -80,6 +80,7 @@ pub enum DexEvent {
     MeteoraDammV2InitializePoolEvent(MeteoraDammV2InitializePoolEvent),
     MeteoraDammV2InitializeCustomizablePoolEvent(MeteoraDammV2InitializeCustomizablePoolEvent),
     MeteoraDammV2InitializePoolWithDynamicConfigEvent(MeteoraDammV2InitializePoolWithDynamicConfigEvent),
+    MeteoraDammV2PoolStateAccountEvent(MeteoraDammV2PoolStateAccountEvent),
 
     // Common events
     TokenAccountEvent(TokenAccountEvent),
@@ -141,6 +142,7 @@ impl DexEvent {
             DexEvent::MeteoraDammV2InitializePoolEvent(e) => &e.metadata,
             DexEvent::MeteoraDammV2InitializeCustomizablePoolEvent(e) => &e.metadata,
             DexEvent::MeteoraDammV2InitializePoolWithDynamicConfigEvent(e) => &e.metadata,
+            DexEvent::MeteoraDammV2PoolStateAccountEvent(e) => &e.metadata,
             DexEvent::TokenAccountEvent(e) => &e.metadata,
             DexEvent::NonceAccountEvent(e) => &e.metadata,
             DexEvent::TokenInfoEvent(e) => &e.metadata,
@@ -200,6 +202,7 @@ impl DexEvent {
             DexEvent::MeteoraDammV2InitializePoolEvent(e) => &mut e.metadata,
             DexEvent::MeteoraDammV2InitializeCustomizablePoolEvent(e) => &mut e.metadata,
             DexEvent::MeteoraDammV2InitializePoolWithDynamicConfigEvent(e) => &mut e.metadata,
+            DexEvent::MeteoraDammV2PoolStateAccountEvent(e) => &mut e.metadata,
             DexEvent::TokenAccountEvent(e) => &mut e.metadata,
             DexEvent::NonceAccountEvent(e) => &mut e.metadata,
             DexEvent::TokenInfoEvent(e) => &mut e.metadata,

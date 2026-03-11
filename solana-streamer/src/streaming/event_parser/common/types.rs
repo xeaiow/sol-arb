@@ -132,6 +132,7 @@ pub enum EventType {
     AccountRaydiumClmmTickArrayState,
     AccountRaydiumCpmmAmmConfig,
     AccountRaydiumCpmmPoolState,
+    AccountMeteoraDammV2Pool,
 
     NonceAccount,
     TokenAccount,
@@ -158,6 +159,7 @@ pub const ACCOUNT_EVENT_TYPES: &[EventType] = &[
     EventType::AccountRaydiumClmmTickArrayState,
     EventType::AccountRaydiumCpmmAmmConfig,
     EventType::AccountRaydiumCpmmPoolState,
+    EventType::AccountMeteoraDammV2Pool,
     EventType::TokenAccount,
     EventType::NonceAccount,
 ];
@@ -231,6 +233,7 @@ impl fmt::Display for EventType {
             }
             EventType::AccountRaydiumCpmmAmmConfig => write!(f, "AccountRaydiumCpmmAmmConfig"),
             EventType::AccountRaydiumCpmmPoolState => write!(f, "AccountRaydiumCpmmPoolState"),
+            EventType::AccountMeteoraDammV2Pool => write!(f, "AccountMeteoraDammV2Pool"),
             EventType::TokenAccount => write!(f, "TokenAccount"),
             EventType::NonceAccount => write!(f, "NonceAccount"),
             EventType::BlockMeta => write!(f, "BlockMeta"),

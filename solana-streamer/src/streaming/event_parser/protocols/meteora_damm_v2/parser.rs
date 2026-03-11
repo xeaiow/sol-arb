@@ -442,3 +442,57 @@ fn parse_initialize_pool_inner_instruction(
         None
     }
 }
+
+/// Parse Meteora DAMM v2 pool account data from gRPC account subscription
+pub fn parse_meteora_damm_v2_account_data(
+    discriminator: &[u8],
+    account: &crate::streaming::grpc::AccountPretty,
+    mut metadata: crate::streaming::event_parser::common::EventMetadata,
+) -> Option<crate::streaming::event_parser::DexEvent> {
+    use crate::streaming::event_parser::common::EventType;
+    use super::events::{
+        MeteoraDammV2PoolStateAccountEvent, METEORA_DAMM_V2_POOL_DISCRIMINATOR,
+        METEORA_DAMM_V2_POOL_ACCOUNT_SIZE,
+    };
+
+    if discriminator != METEORA_DAMM_V2_POOL_DISCRIMINATOR {
+        return None;
+    }
+
+    if account.data.len() < METEORA_DAMM_V2_POOL_ACCOUNT_SIZE {
+        return None;
+    }
+
+    metadata.event_type = EventType::AccountMeteoraDammV2Pool;
+
+    let data = &account.data;
+
+    // Read cliff_fee_numerator from base_fee_info.data[0..8] (offset 8 in account data)
+    let cliff_fee_numerator = u64::from_le_bytes(data[8..16].try_into().ok()?);
+
+    // Read mints and vaults
+    let token_a_mint = Pubkey::try_from(&data[168..200]).ok()?;
+    let token_b_mint = Pubkey::try_from(&data[200..232]).ok()?;
+    let token_a_vault = Pubkey::try_from(&data[232..264]).ok()?;
+    let token_b_vault = Pubkey::try_from(&data[264..296]).ok()?;
+
+    // Read flags
+    let pool_status = data[481];
+    let token_a_flag = data[482];
+    let token_b_flag = data[483];
+
+    Some(DexEvent::MeteoraDammV2PoolStateAccountEvent(
+        MeteoraDammV2PoolStateAccountEvent {
+            metadata,
+            pubkey: account.pubkey,
+            token_a_mint,
+            token_b_mint,
+            token_a_vault,
+            token_b_vault,
+            token_a_flag,
+            token_b_flag,
+            pool_status,
+            cliff_fee_numerator,
+        },
+    ))
+}

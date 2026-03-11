@@ -281,8 +281,7 @@ impl EventDispatcher {
                 raydium_amm_v4::parse_raydium_amm_v4_account_data(discriminator, account, metadata)
             }
             Protocol::MeteoraDammV2 => {
-                // Meteora DAMM 目前不需要解析账户数据，返回 None
-                None
+                meteora_damm_v2::parse_meteora_damm_v2_account_data(discriminator, account, metadata)
             }
         }
     }
