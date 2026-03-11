@@ -22,5 +22,8 @@ Thumbs.db
 .env
 .env.*
 
+# Config with secrets
+executor/config.toml
+
 # Claude Code
 .claude/
