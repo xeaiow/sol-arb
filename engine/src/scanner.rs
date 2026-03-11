@@ -227,7 +227,7 @@ impl Scanner {
         // --- Evaluate remaining routes ---
         let mut opportunities = 0;
         let mut probe_passed = 0;
-        let mut pool_not_ready = 0;
+
         let routes: Vec<Route> = self.route_table.routes.clone();
 
         for route in &routes {
