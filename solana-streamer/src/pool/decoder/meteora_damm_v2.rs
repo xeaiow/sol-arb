@@ -78,3 +78,69 @@ pub fn decode_bytes(address: &Pubkey, data: &[u8]) -> Option<PoolState> {
         last_updated_slot: 0,
     })
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn make_test_pool_data() -> Vec<u8> {
+        let mut data = vec![0u8; 1112];
+        // discriminator
+        data[0..8].copy_from_slice(&[241, 154, 109, 4, 17, 177, 109, 188]);
+        // cliff_fee_numerator = 2_500_000 (0.25%)
+        data[8..16].copy_from_slice(&2_500_000u64.to_le_bytes());
+        // token_a_mint
+        data[168..200].copy_from_slice(&[1u8; 32]);
+        // token_b_mint
+        data[200..232].copy_from_slice(&[2u8; 32]);
+        // token_a_vault
+        data[232..264].copy_from_slice(&[3u8; 32]);
+        // token_b_vault
+        data[264..296].copy_from_slice(&[4u8; 32]);
+        // pool_status = 0 (enabled)
+        data[481] = 0;
+        // token_a_flag = 0 (SPL Token)
+        data[482] = 0;
+        // token_b_flag = 1 (Token-2022)
+        data[483] = 1;
+        data
+    }
+
+    #[test]
+    fn test_decode_bytes_extracts_fields() {
+        let data = make_test_pool_data();
+        let address = Pubkey::new_unique();
+        let pool = decode_bytes(&address, &data).unwrap();
+
+        assert_eq!(pool.address, address);
+        assert_eq!(pool.dex_type, DexType::MeteoraDammV2);
+        assert_eq!(pool.mint_a, Pubkey::new_from_array([1u8; 32]));
+        assert_eq!(pool.mint_b, Pubkey::new_from_array([2u8; 32]));
+        assert_eq!(pool.vault_a, Some(Pubkey::new_from_array([3u8; 32])));
+        assert_eq!(pool.vault_b, Some(Pubkey::new_from_array([4u8; 32])));
+        assert!(!pool.mint_a_is_2022);
+        assert!(pool.mint_b_is_2022);
+
+        match pool.math {
+            PoolMath::ConstantProduct {
+                reserve_a,
+                reserve_b,
+                fee_numerator,
+                fee_denominator,
+            } => {
+                assert_eq!(reserve_a, 0);
+                assert_eq!(reserve_b, 0);
+                assert_eq!(fee_numerator, 2_500_000);
+                assert_eq!(fee_denominator, 1_000_000_000);
+            }
+            _ => panic!("Expected ConstantProduct math"),
+        }
+    }
+
+    #[test]
+    fn test_decode_bytes_too_short() {
+        let data = vec![0u8; 100];
+        let address = Pubkey::new_unique();
+        assert!(decode_bytes(&address, &data).is_none());
+    }
+}
