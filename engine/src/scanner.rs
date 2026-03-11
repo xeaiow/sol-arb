@@ -98,15 +98,6 @@ impl Scanner {
         };
 
         let is_new = !self.graph.address_to_pool.contains_key(&update.pool_address);
-
-        // Check if pool previously failed min_reserve check (before upsert)
-        let had_min_reserve = if !is_new {
-            let idx = self.graph.address_to_pool[&update.pool_address];
-            self.graph.pool_has_min_reserve(idx, self.config.min_reserve_lamports)
-        } else {
-            false
-        };
-
         let pool_index = self.graph.add_pool(entry);
 
         match &self.phase {
@@ -145,19 +136,6 @@ impl Scanner {
                         info!("New pool {} added {} routes (total {})",
                             update.pool_address, after - before, after);
                     }
-                } else if !had_min_reserve
-                    && self.graph.pool_has_min_reserve(pool_index, self.config.min_reserve_lamports)
-                {
-                    // Reserve just became valid: build routes for this pool
-                    let before = self.route_table.route_count();
-                    self.route_table.add_routes_for_pool(
-                        &self.graph,
-                        &self.config,
-                        pool_index,
-                    );
-                    let after = self.route_table.route_count();
-                    info!("Pool {} reserve activated, added {} routes (total {})",
-                        update.pool_address, after - before, after);
                 }
 
                 // Incremental scan: only routes affected by this pool

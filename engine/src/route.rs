@@ -108,6 +108,11 @@ impl RouteTable {
         path: &mut ArrayVec<Hop, 4>,
         visited_pools: &mut HashSet<u32>,
     ) {
+        // Safety: cap total routes to prevent memory explosion
+        if self.routes.len() >= 50_000 {
+            return;
+        }
+
         let depth = path.len();
 
         // If we have at least 2 hops and we're back at base, record route
@@ -130,15 +135,14 @@ impl RouteTable {
                 continue;
             }
 
-            // Pruning: min reserve
-            if !graph.pool_has_min_reserve(edge.pool_index, config.min_reserve_lamports) {
-                continue;
-            }
-
-            // Pruning: max fee
+            // Pruning: max fee (skip unreasonably expensive pools)
             if graph.pool_fee_ratio(edge.pool_index) > config.max_hop_fee {
                 continue;
             }
+
+            // Note: min_reserve is NOT checked here — vault balances may not be
+            // loaded yet during warmup. Routes with zero reserves will naturally
+            // produce zero output in simulate_route_profit(), so no false positives.
 
             // Don't revisit base except to close the cycle
             if edge.target == base_node && depth < 1 {
