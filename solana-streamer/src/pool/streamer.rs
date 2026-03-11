@@ -248,7 +248,10 @@ impl PoolStreamer {
                             loaded += 1;
                         }
                     }
-                    Err(_) => {
+                    Err(e) => {
+                        if failed == 0 {
+                            info!("CLMM tick_array fetch err for {}: {}", pda, e);
+                        }
                         failed += 1;
                     }
                 }
