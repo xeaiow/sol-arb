@@ -37,8 +37,8 @@ pub fn jittered_cu(base_cu: u32, jitter_range: u32) -> u32 {
     base_cu + rng.gen_range(0..jitter_range)
 }
 
-/// Extra CU for MarginFi flashloan (start + borrow + repay + end)
-pub const FLASHLOAN_CU_OVERHEAD: u32 = 80_000;
+/// Extra CU for MarginFi flashloan (create_ata + start + borrow + repay + end)
+pub const FLASHLOAN_CU_OVERHEAD: u32 = 120_000;
 
 pub fn estimate_cu(dex_types: &[u8]) -> u32 {
     let mut cu: u32 = 100; // program overhead

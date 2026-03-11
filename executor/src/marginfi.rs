@@ -27,6 +27,12 @@ const BANK_GROUP_OFFSET: usize = 41;
 const BANK_VAULT_OFFSET: usize = 112;
 const BANK_VAULT_AUTH_BUMP_OFFSET: usize = 145;
 const BANK_ORACLE_KEY_OFFSET: usize = 610;
+const BANK_ASSET_TAG_OFFSET: usize = 785;
+
+/// Asset tag values — only DEFAULT, SOL, STAKED can be used with standard borrow/repay
+const ASSET_TAG_DEFAULT: u8 = 0;
+const ASSET_TAG_SOL: u8 = 1;
+const ASSET_TAG_STAKED: u8 = 2;
 
 /// MarginfiAccount data: authority at offset 40, group at offset 8
 const ACCOUNT_GROUP_OFFSET: usize = 8;
@@ -179,6 +185,16 @@ impl MarginFiState {
                 continue;
             }
 
+            // Filter by asset_tag: only DEFAULT, SOL, STAKED are usable with standard borrow/repay
+            let asset_tag = data[BANK_ASSET_TAG_OFFSET];
+            if asset_tag != ASSET_TAG_DEFAULT && asset_tag != ASSET_TAG_SOL && asset_tag != ASSET_TAG_STAKED {
+                log::debug!(
+                    "Skipping bank {} with asset_tag={} (not DEFAULT/SOL/STAKED)",
+                    bank_address, asset_tag
+                );
+                continue;
+            }
+
             let mint = Pubkey::try_from(&data[BANK_MINT_OFFSET..BANK_MINT_OFFSET + 32])
                 .map_err(|e| anyhow::anyhow!("Invalid mint in bank {}: {:?}", bank_address, e))?;
             let vault = Pubkey::try_from(&data[BANK_VAULT_OFFSET..BANK_VAULT_OFFSET + 32])
@@ -301,9 +317,10 @@ impl MarginFiState {
             .get(mint)
             .ok_or_else(|| anyhow::anyhow!("No bank for mint {}", mint))?;
 
-        let mut data = Vec::with_capacity(16);
+        let mut data = Vec::with_capacity(17);
         data.extend_from_slice(&REPAY_DISC);
         data.extend_from_slice(&amount.to_le_bytes());
+        data.push(0); // repay_all: Option<bool> = None
 
         Ok(Instruction {
             program_id: self.program_id,
