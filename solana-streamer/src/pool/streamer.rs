@@ -235,6 +235,8 @@ impl PoolStreamer {
             decoder::raydium_clmm::tick_array_start_indices(tick_current, tick_spacing);
         let mut pending = self.pending_subscriptions.lock().await;
 
+        let mut loaded = 0u32;
+        let mut failed = 0u32;
         for start_index in start_indices {
             if let Some(pda) = decoder::raydium_clmm::tick_array_pda(pool_address, start_index) {
                 match self.rpc.get_account_data(&pda).await {
@@ -243,14 +245,19 @@ impl PoolStreamer {
                             tick_arrays.push(ta);
                             self.cache.register_tick_array(pda, *pool_address);
                             pending.push(pda.to_string());
+                            loaded += 1;
                         }
                     }
                     Err(_) => {
-                        // Tick array may not be initialized — this is normal
+                        failed += 1;
                     }
                 }
             }
         }
+        info!(
+            "CLMM {} tick_arrays: {} loaded, {} failed (tick={}, spacing={})",
+            pool_address, loaded, failed, tick_current, tick_spacing
+        );
     }
 
     /// Drain pending subscription addresses (call before update_subscription)
