@@ -85,15 +85,36 @@ fn read_token_balance(account: &AccountView) -> Result<u64, ProgramError> {
 }
 
 /// Route to the correct DEX CPI.
+/// When amount_in == 0 (non-first hops), reads the user's input token account
+/// balance to determine the actual amount. This is necessary because some DEXes
+/// (e.g. Raydium CLMM) reject amount=0 with ZeroAmountSpecified.
 fn dispatch_swap(hop: &HopInfo, pool_accounts: &[AccountView], amount_in: u64) -> ProgramResult {
+    let amount = if amount_in == 0 {
+        // Read balance from user's input token account.
+        // The input ATA position varies by DEX and direction:
+        let input_ata_index = match hop.dex_type {
+            DexType::RaydiumAmmV4 => 5,  // user_source
+            DexType::RaydiumCpmm => 4,   // input_token_account
+            DexType::RaydiumClmm => 3,   // input_token_account
+            DexType::PumpFun => 5,       // associated_user (token ATA, used for both buy/sell)
+            DexType::PumpSwap => if hop.is_a_to_b { 6 } else { 5 },
+                // buy: input=quote [6], sell: input=base [5]
+            DexType::Bonk => 6,          // swapper_x_account
+            DexType::MeteoraDammV2 => 2, // input_token_account
+        };
+        read_token_balance(&pool_accounts[input_ata_index])?
+    } else {
+        amount_in
+    };
+
     match hop.dex_type {
-        DexType::RaydiumAmmV4 => swap_raydium_amm(pool_accounts, amount_in),
-        DexType::RaydiumCpmm => swap_raydium_cp(pool_accounts, amount_in),
-        DexType::RaydiumClmm => swap_raydium_clmm(pool_accounts, amount_in),
-        DexType::PumpFun => swap_pumpfun(pool_accounts, hop.is_a_to_b, amount_in),
-        DexType::PumpSwap => swap_pumpswap(pool_accounts, hop.is_a_to_b, amount_in),
-        DexType::Bonk => swap_bonkswap(pool_accounts, amount_in),
-        DexType::MeteoraDammV2 => swap_meteora_damm_v2(pool_accounts, amount_in),
+        DexType::RaydiumAmmV4 => swap_raydium_amm(pool_accounts, amount),
+        DexType::RaydiumCpmm => swap_raydium_cp(pool_accounts, amount),
+        DexType::RaydiumClmm => swap_raydium_clmm(pool_accounts, amount),
+        DexType::PumpFun => swap_pumpfun(pool_accounts, hop.is_a_to_b, amount),
+        DexType::PumpSwap => swap_pumpswap(pool_accounts, hop.is_a_to_b, amount),
+        DexType::Bonk => swap_bonkswap(pool_accounts, amount),
+        DexType::MeteoraDammV2 => swap_meteora_damm_v2(pool_accounts, amount),
     }
 }
 
