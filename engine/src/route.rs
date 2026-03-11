@@ -67,8 +67,12 @@ impl RouteTable {
 
         for base_mint in &config.base_mints {
             let Some(&base_node) = graph.mint_to_index.get(base_mint) else {
+                info!("Base mint {} not found in graph", base_mint);
                 continue;
             };
+
+            let edges = graph.adjacency[base_node as usize].len();
+            let routes_before = self.routes.len();
 
             let mut path: ArrayVec<Hop, 4> = ArrayVec::new();
             let mut visited_pools: HashSet<u32> = HashSet::new();
@@ -82,6 +86,11 @@ impl RouteTable {
                 &mut path,
                 &mut visited_pools,
             );
+
+            info!(
+                "Base mint {} (node {}): {} edges, {} routes found",
+                base_mint, base_node, edges, self.routes.len() - routes_before
+            );
         }
 
         // Build inverted index
@@ -90,11 +99,17 @@ impl RouteTable {
             self.index.register_route(i as u32, route);
         }
 
+        // Count mints with 2+ edges (needed for cycles)
+        let multi_edge_mints = graph.adjacency.iter()
+            .filter(|adj| adj.len() >= 2)
+            .count();
+
         info!(
-            "Route table built: {} routes from {} pools, {} mints",
+            "Route table built: {} routes from {} pools, {} mints ({} with 2+ edges)",
             self.routes.len(),
             graph.pool_count(),
             graph.mint_count(),
+            multi_edge_mints,
         );
     }
 

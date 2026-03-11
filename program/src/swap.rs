@@ -163,27 +163,79 @@ fn swap_raydium_cp(accounts: &[AccountView], amount_in: u64) -> ProgramResult {
     dex_pinocchio_cpi::raydium_cp::swap_base_input(&swap_accounts, &args, &[])
 }
 
-/// Raydium CLMM: swap (10 accounts).
+/// Raydium CLMM: swap with up to 3 tick arrays (10 base + 0-2 extra tick arrays).
+/// accounts[0..10] = base swap accounts, accounts[10..] = extra tick arrays.
 fn swap_raydium_clmm(accounts: &[AccountView], amount_in: u64) -> ProgramResult {
-    let swap_accounts = dex_pinocchio_cpi::raydium_clmm::SwapAccounts {
-        payer: &accounts[0],
-        amm_config: &accounts[1],
-        pool_state: &accounts[2],
-        input_token_account: &accounts[3],
-        output_token_account: &accounts[4],
-        input_vault: &accounts[5],
-        output_vault: &accounts[6],
-        observation_state: &accounts[7],
-        token_program: &accounts[8],
-        tick_array: &accounts[9],
-    };
+    use pinocchio::instruction::{InstructionView, InstructionAccount};
+    use pinocchio::cpi::invoke_signed_with_slice;
+
+    // Build instruction data: 8-byte discriminator + SwapArgs
     let args = dex_pinocchio_cpi::raydium_clmm::SwapArgs {
         amount: amount_in,
-        other_amount_threshold: 0, // profit verified atomically
+        other_amount_threshold: 0,
         sqrt_price_limit_x64: 0,
         is_base_input: true,
     };
-    dex_pinocchio_cpi::raydium_clmm::swap(&swap_accounts, &args, &[])
+    let mut data = [0u8; 8 + core::mem::size_of::<dex_pinocchio_cpi::raydium_clmm::SwapArgs>()];
+    data[0..8].copy_from_slice(&dex_pinocchio_cpi::raydium_clmm::SWAP);
+    unsafe {
+        core::ptr::copy_nonoverlapping(
+            &args as *const _ as *const u8,
+            data.as_mut_ptr().add(8),
+            core::mem::size_of::<dex_pinocchio_cpi::raydium_clmm::SwapArgs>(),
+        );
+    }
+
+    // Base 10 accounts + extra tick arrays (up to 2 more).
+    let total = accounts.len().min(12);
+
+    // Detect duplicate tick arrays to avoid AccountBorrowFailed.
+    // accounts[9] is always the primary tick array (writable).
+    // accounts[10] and [11] are extra — only writable if distinct from prior ones.
+    let ta0 = accounts[9].address();
+    let ta1_distinct = total > 10 && accounts[10].address() != ta0;
+    let ta2_distinct = total > 11
+        && accounts[11].address() != ta0
+        && accounts[11].address() != accounts[10].address();
+
+    let instruction_accounts: [InstructionAccount; 12] = [
+        InstructionAccount::readonly_signer(accounts[0].address()),
+        InstructionAccount::readonly(accounts[1].address()),
+        InstructionAccount::writable(accounts[2].address()),
+        InstructionAccount::writable(accounts[3].address()),
+        InstructionAccount::writable(accounts[4].address()),
+        InstructionAccount::writable(accounts[5].address()),
+        InstructionAccount::writable(accounts[6].address()),
+        InstructionAccount::writable(accounts[7].address()),
+        InstructionAccount::readonly(accounts[8].address()),
+        InstructionAccount::writable(ta0),
+        if ta1_distinct {
+            InstructionAccount::writable(accounts[10].address())
+        } else {
+            InstructionAccount::readonly(accounts[if total > 10 { 10 } else { 9 }].address())
+        },
+        if ta2_distinct {
+            InstructionAccount::writable(accounts[11].address())
+        } else {
+            InstructionAccount::readonly(accounts[if total > 11 { 11 } else { 9 }].address())
+        },
+    ];
+
+    let instruction = InstructionView {
+        program_id: &dex_pinocchio_cpi::raydium_clmm::ID,
+        accounts: &instruction_accounts[..total],
+        data: &data,
+    };
+
+    let views: [&AccountView; 12] = [
+        &accounts[0], &accounts[1], &accounts[2], &accounts[3],
+        &accounts[4], &accounts[5], &accounts[6], &accounts[7],
+        &accounts[8], &accounts[9],
+        &accounts[if total > 10 { 10 } else { 9 }],
+        &accounts[if total > 11 { 11 } else { 9 }],
+    ];
+
+    invoke_signed_with_slice(&instruction, &views[..total], &[])
 }
 
 /// PumpFun: buy or sell based on direction (buy=16 accts, sell=14 accts).

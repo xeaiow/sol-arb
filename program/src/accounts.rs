@@ -32,7 +32,7 @@ impl DexType {
         match self {
             DexType::RaydiumAmmV4 => 9,
             DexType::RaydiumCpmm => 14,
-            DexType::RaydiumClmm => 11,
+            DexType::RaydiumClmm => 13, // 10 base + 3 tick arrays
             DexType::PumpFun => 16,
             DexType::PumpSwap => 23,
             DexType::Bonk => 17,

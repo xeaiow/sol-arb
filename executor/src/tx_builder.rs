@@ -449,19 +449,29 @@ impl TxBuilder {
                 ]
             }
 
-            // Raydium CLMM: 11 accounts (10 for CPI + program ID)
-            // extra[0]=amm_config, extra[1]=observation_key, extra[2]=tick_array
+            // Raydium CLMM: 13 accounts (10 base + 3 tick arrays)
+            // extra[0]=amm_config, extra[1]=observation_key, extra[2..]=tick_arrays
             // swap.rs: [payer, amm_config, pool_state, input_ata, output_ata,
-            //  input_vault, output_vault, observation, token_program, tick_array]
+            //  input_vault, output_vault, observation, token_program, tick_array0, tick_array1, tick_array2]
             DexType::RaydiumClmm => {
                 let amm_config = extra.first().copied().unwrap_or_default();
                 let observation = extra.get(1).copied().unwrap_or_default();
-                let tick_array = extra.get(2).copied().unwrap_or(Pubkey::default());
-                if tick_array == Pubkey::default() {
+                // Tick arrays start at extra[2]; pad to 3 by repeating the first
+                let tick_arrays: Vec<Pubkey> = if extra.len() > 2 {
+                    extra[2..].to_vec()
+                } else {
+                    vec![]
+                };
+                if tick_arrays.is_empty() || tick_arrays[0] == Pubkey::default() {
                     log::warn!("CLMM tick_array missing for pool {}, skipping hop", pool);
                     return vec![];
                 }
-                vec![
+                // Pad to exactly 3 tick arrays by repeating the first.
+                // Duplicates must be readonly to avoid AccountBorrowFailed.
+                let ta0 = tick_arrays[0];
+                let ta1 = tick_arrays.get(1).copied().unwrap_or(ta0);
+                let ta2 = tick_arrays.get(2).copied().unwrap_or(ta0);
+                let mut metas = vec![
                     AccountMeta::new(self.payer_pubkey, true),
                     AccountMeta::new_readonly(amm_config, false),
                     AccountMeta::new(pool, false),
@@ -471,9 +481,21 @@ impl TxBuilder {
                     AccountMeta::new(output_vault, false),
                     AccountMeta::new(observation, false),
                     AccountMeta::new_readonly(SPL_TOKEN_PROGRAM_ID, false),
-                    AccountMeta::new(tick_array, false),
-                    AccountMeta::new_readonly(RAYDIUM_CLMM_PROGRAM, false),
-                ]
+                    AccountMeta::new(ta0, false),
+                ];
+                // Only add ta1/ta2 as writable if they are distinct
+                if ta1 != ta0 {
+                    metas.push(AccountMeta::new(ta1, false));
+                } else {
+                    metas.push(AccountMeta::new_readonly(ta1, false));
+                }
+                if ta2 != ta0 && ta2 != ta1 {
+                    metas.push(AccountMeta::new(ta2, false));
+                } else {
+                    metas.push(AccountMeta::new_readonly(ta2, false));
+                }
+                metas.push(AccountMeta::new_readonly(RAYDIUM_CLMM_PROGRAM, false));
+                metas
             }
 
             // PumpFun: 16 accounts (buy layout, sell uses 14 but on-chain slices)
