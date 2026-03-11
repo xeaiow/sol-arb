@@ -17,6 +17,7 @@ use solana_streamer_sdk::pool::state::DexType;
 use crate::alt::Tier0Alt;
 use crate::anti_fp;
 use crate::config::ExecutorConfigFile;
+use crate::marginfi::MarginFiState;
 
 // ── DEX Program IDs ──
 const RAYDIUM_AMM_V4_PROGRAM: Pubkey = solana_sdk::pubkey!("675kPX9MHTjS2zt1qfr1NYHuzeLXfQM9H24wFSUt1Mp8");
@@ -97,6 +98,7 @@ pub struct TxBuilder {
     jito_enabled: bool,
     swqos_enabled: bool,
     alt: Option<Arc<Tier0Alt>>,
+    marginfi_state: Option<Arc<MarginFiState>>,
     /// Test mode: skip profit verification on-chain (discriminator +3)
     pub test_mode: bool,
 }
@@ -141,8 +143,14 @@ impl TxBuilder {
             jito_enabled,
             swqos_enabled: flashblock_enabled || astralane_enabled,
             alt: None,
+            marginfi_state: None,
             test_mode: false,
         }
+    }
+
+    /// Set the MarginFi state for flashloan wrapping
+    pub fn set_marginfi(&mut self, state: Arc<MarginFiState>) {
+        self.marginfi_state = Some(state);
     }
 
     /// Set the pre-loaded ALT for VersionedTransaction compression
@@ -166,7 +174,10 @@ impl TxBuilder {
             .iter()
             .map(|s| s.dex_type as u8)
             .collect();
-        let base_cu = anti_fp::estimate_cu(&dex_types);
+        let mut base_cu = anti_fp::estimate_cu(&dex_types);
+        if self.marginfi_state.is_some() {
+            base_cu += anti_fp::FLASHLOAN_CU_OVERHEAD;
+        }
         let cu_limit = anti_fp::jittered_cu(base_cu, self.cu_jitter_range);
 
         let arb_ix = self.build_arb_instruction(opp);
@@ -179,6 +190,9 @@ impl TxBuilder {
 
         // Create ATA instructions for base mint + all intermediate mints
         let create_ata_ixs = self.build_create_ata_ixs(opp);
+
+        // Build flashloan instructions if enabled
+        let flashloan_ixs = self.build_flashloan_ixs(opp, &create_ata_ixs);
 
         let lookup_tables: Vec<AddressLookupTableAccount> = self
             .alt
@@ -195,7 +209,15 @@ impl TxBuilder {
                     ComputeBudgetInstruction::set_compute_unit_limit(cu_limit),
                 ];
                 ixs.extend(create_ata_ixs.clone());
+                if let Some(ref fl) = flashloan_ixs {
+                    ixs.push(fl.start_jito.clone());
+                    ixs.push(fl.borrow.clone());
+                }
                 ixs.push(arb_ix.clone());
+                if let Some(ref fl) = flashloan_ixs {
+                    ixs.push(fl.repay.clone());
+                    ixs.push(fl.end.clone());
+                }
                 ixs.push(system_instruction::transfer(&payer.pubkey(), &tip_account, tip));
                 ixs
             })
@@ -215,7 +237,15 @@ impl TxBuilder {
                 ComputeBudgetInstruction::set_compute_unit_price(cu_price),
             ];
             ixs.extend(create_ata_ixs);
+            if let Some(ref fl) = flashloan_ixs {
+                ixs.push(fl.start.clone());
+                ixs.push(fl.borrow.clone());
+            }
             ixs.push(arb_ix);
+            if let Some(ref fl) = flashloan_ixs {
+                ixs.push(fl.repay.clone());
+                ixs.push(fl.end.clone());
+            }
             ixs.push(system_instruction::transfer(&payer.pubkey(), &tip_account, astralane_tip));
             Some(ixs)
         } else {
@@ -750,6 +780,56 @@ impl TxBuilder {
         }).collect()
     }
 
+    /// Build flashloan instructions (start, borrow, repay, end) if MarginFi is configured.
+    /// Returns None if flashloan is not enabled or base_mint has no MarginFi bank.
+    fn build_flashloan_ixs(
+        &self,
+        opp: &Opportunity,
+        create_ata_ixs: &[Instruction],
+    ) -> Option<FlashloanIxs> {
+        let mfi = self.marginfi_state.as_ref()?;
+
+        let base_mint = opp.route.base_mint;
+        let bank = mfi.banks.get(&base_mint)?;
+        let user_base_ata = derive_ata(&self.payer_pubkey, &base_mint);
+
+        // Calculate end_flashloan index in the final instruction list.
+        // Layout (swqos): [set_cu_limit, set_cu_price, ...create_atas, start, borrow, arb, repay, end, tip]
+        // Layout (jito):  [set_cu_limit, ...create_atas, start, borrow, arb, repay, end, tip]
+        // We use a placeholder; the actual index depends on the variant.
+        // For swqos: 2 + create_ata_count + 4 (start, borrow, arb, repay) = end index
+        // For jito:  1 + create_ata_count + 4 = end index
+        // Since both variants build independently, we compute for the larger (swqos) case.
+        // MarginFi checks: tx.instructions[end_index].program_id == MarginFi program
+        // end_index is 0-based absolute position in the transaction.
+        let ata_count = create_ata_ixs.len();
+        // We'll use swqos layout as default (2 compute budget ixs).
+        // For jito (1 compute budget ix), end_index would be off by 1,
+        // but we build separate FlashloanIxs for each variant below.
+        // Actually, start_flashloan's end_index is checked at runtime by MarginFi,
+        // so we need the correct value. Let's compute per-variant in build().
+        // For now, return the instructions with a placeholder end_index=0,
+        // and fix it up in build().
+
+        // Actually, let's just compute for both and pick later. Since this method
+        // is called once, let's compute the swqos end_index (the common path).
+        let end_index_swqos = (2 + ata_count + 4) as u64; // set_cu_limit + set_cu_price + atas + start + borrow + arb + repay
+        let end_index_jito = (1 + ata_count + 4) as u64;  // set_cu_limit + atas + start + borrow + arb + repay
+
+        let start = mfi.build_start_flashloan_ix(&self.payer_pubkey, end_index_swqos);
+        let start_jito = mfi.build_start_flashloan_ix(&self.payer_pubkey, end_index_jito);
+        let borrow = mfi.build_borrow_ix(&self.payer_pubkey, &base_mint, &user_base_ata, opp.amount_in)
+            .ok()?;
+        let repay = mfi.build_repay_ix(&self.payer_pubkey, &base_mint, &user_base_ata, opp.amount_in)
+            .ok()?;
+        let end = mfi.build_end_flashloan_ix(
+            &self.payer_pubkey,
+            &[(bank.address, bank.oracle)],
+        );
+
+        Some(FlashloanIxs { start, start_jito, borrow, repay, end })
+    }
+
     fn calculate_cu_price(&self, expected_profit: u64, base_cu: u32) -> u64 {
         // Minimum total priority fee = 10000 lamports (Astralane/SWQoS requirement)
         let min_total_fee: u64 = 10_000;
@@ -758,4 +838,13 @@ impl TxBuilder {
         // micro-lamports per CU
         (fee_budget * 1_000_000) / base_cu as u64
     }
+}
+
+/// Pre-built flashloan instructions for wrapping arb transactions
+struct FlashloanIxs {
+    start: Instruction,      // start_flashloan (swqos end_index)
+    start_jito: Instruction, // start_flashloan (jito end_index)
+    borrow: Instruction,
+    repay: Instruction,
+    end: Instruction,
 }

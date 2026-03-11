@@ -19,7 +19,8 @@ pub struct Executor {
     opp_rx: mpsc::Receiver<Opportunity>,
     payer: Arc<Keypair>,
     rpc: Arc<RpcClient>,
-    _marginfi_state: Option<Arc<MarginFiState>>,
+    #[allow(dead_code)] // Held to keep Arc alive; TxBuilder has a clone
+    marginfi_state: Option<Arc<MarginFiState>>,
 }
 
 impl Executor {
@@ -65,7 +66,9 @@ impl Executor {
                     "flashloan_enabled=true but MarginFi init failed: {}. \
                      Set flashloan_enabled=false or fix the issue.", e
                 ))?;
-            Some(Arc::new(state))
+            let state = Arc::new(state);
+            tx_builder.set_marginfi(state.clone());
+            Some(state)
         } else {
             None
         };
@@ -79,7 +82,7 @@ impl Executor {
             opp_rx,
             payer: Arc::new(payer),
             rpc,
-            _marginfi_state: marginfi_state,
+            marginfi_state: marginfi_state,
         })
     }
 

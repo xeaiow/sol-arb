@@ -1,25 +1,25 @@
 [general]
 keypair_path = "~/.config/solana/id.json"
-rpc_url = "https://api.mainnet-beta.solana.com"
+rpc_url = "https://mainnet.helius-rpc.com/?api-key=89ed37ec-971c-48e0-99db-921d568354e6"
 grpc_endpoint = "https://solana-yellowstone-grpc.publicnode.com:443"
 grpc_token = "a8be362b3dad184ed061a9b23a11b180d1551146c82f60c0ae12ffaf51b66a55"
 log_level = "info"
 
 [engine]
-max_hops = 2
+max_hops = 3
 warmup_secs = 30
 warmup_pool_count = 1000
 full_scan_interval_secs = 5
-min_reserve_sol = 10.0
+min_reserve_sol = 0.1
 max_hop_fee = 0.02
-min_profit_sol = 0.001
+min_profit_sol = 0.0001
 max_input_sol = 100.0
 ternary_iterations = 10
 probe_amount_sol = 1.0
 # base_mints = ["So11111111111111111111111111111111111111112", "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v"]
 
 [executor]
-flashloan_enabled = false
+flashloan_enabled = true
 program_id = "8NwGVcMu96JTJwfUKQNXjYMd87JyGWcPkaENe9NPzLCV"
 alt_address = "FNFedTyPSj8b8SQwx6ujyKVVMeP4dXivWa4HDMKqgAfG"
 
@@ -32,7 +32,7 @@ fee_collectors_sol = [
 ]
 
 [jito]
-enabled = true
+enabled = false
 block_engine_urls = [
     "https://mainnet.block-engine.jito.wtf",
     "https://amsterdam.mainnet.block-engine.jito.wtf",
@@ -42,7 +42,7 @@ block_engine_urls = [
     "https://slc.mainnet.block-engine.jito.wtf",
 ]
 tip_percentage = 60
-min_tip_lamports = 1000
+min_tip_lamports = 10000
 min_operator_profit_lamports = 5000
 
 [flashblock]
@@ -61,14 +61,14 @@ enabled = true
 api_key = "xyz_06iaBUneeAX291ZtQbMoGEMAStUaW9YXyHo2dIrkVSwSZiEspN75RJjTupMN"
 cu_price_percentage = 30
 endpoints = [
-    "https://fr.gateway.astralane.io/iris",
-    "https://fr2.gateway.astralane.io/iris",
-    "https://ams.gateway.astralane.io/iris",
-    "https://ams2.gateway.astralane.io/iris",
-    "https://la.gateway.astralane.io/iris",
-    "https://ny.gateway.astralane.io/iris",
-    "https://jp.gateway.astralane.io/iris",
-    "https://sg.gateway.astralane.io/iris",
-    "https://lim.gateway.astralane.io/iris",
-    "https://lit.gateway.astralane.io/iris",
+    "https://fr.gateway.astralane.io/iris2",
+    "https://fr2.gateway.astralane.io/iris2",
+    "https://ams.gateway.astralane.io/iris2",
+    "https://ams2.gateway.astralane.io/iris2",
+    "https://la.gateway.astralane.io/iris2",
+    "https://ny.gateway.astralane.io/iris2",
+    "https://jp.gateway.astralane.io/iris2",
+    "https://sg.gateway.astralane.io/iris2",
+    "https://lim.gateway.astralane.io/iris2",
+    "https://lit.gateway.astralane.io/iris2",
 ]
