@@ -242,6 +242,13 @@ impl Scanner {
     fn evaluate_route(&mut self, route: &Route, slot: u64) -> bool {
         let rk = route_key(route);
 
+        // Skip routes with pools below minimum reserve
+        for hop in &route.hops {
+            if !self.graph.pool_has_min_reserve(hop.pool_index, self.config.min_reserve_lamports) {
+                return false;
+            }
+        }
+
         // Quick probe
         let probe_profit = optimizer::simulate_route_profit(
             route,

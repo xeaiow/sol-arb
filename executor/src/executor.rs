@@ -166,6 +166,14 @@ impl Executor {
             let t_start = std::time::Instant::now();
             let pair = self.tx_builder.build(&opp, &self.payer, recent_blockhash);
 
+            // Log transaction signatures for on-chain lookup
+            if let Some(ref tx) = pair.jito_tx {
+                info!("Jito tx sig: {}", tx.signatures[0]);
+            }
+            if let Some(ref tx) = pair.swqos_tx {
+                info!("SwQoS tx sig: {}", tx.signatures[0]);
+            }
+
             {
                 let path: Vec<String> = opp.pool_snapshots.iter().map(|s| {
                     let dir = if s.is_a_to_b { "→" } else { "←" };
