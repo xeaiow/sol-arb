@@ -625,9 +625,9 @@ impl TxBuilder {
                     &[b"user_volume_accumulator", self.payer_pubkey.as_ref()],
                     &PUMPFUN_PROGRAM,
                 );
-                // fee_config PDA of fee program: ["fee_config"]
+                // fee_config PDA of fee program: ["fee_config", program_id]
                 let (fee_config, _) = Pubkey::find_program_address(
-                    &[b"fee_config"],
+                    &[b"fee_config", PUMPFUN_PROGRAM.as_ref()],
                     &PUMPFUN_FEE_PROGRAM,
                 );
                 vec![
@@ -691,9 +691,9 @@ impl TxBuilder {
                     &[b"user_volume_accumulator", self.payer_pubkey.as_ref()],
                     &PUMPSWAP_PROGRAM,
                 );
-                // fee_config PDA
+                // fee_config PDA: ["fee_config", program_id]
                 let (fee_config, _) = Pubkey::find_program_address(
-                    &[b"fee_config"],
+                    &[b"fee_config", PUMPSWAP_PROGRAM.as_ref()],
                     &PUMPSWAP_FEE_PROGRAM,
                 );
                 vec![
