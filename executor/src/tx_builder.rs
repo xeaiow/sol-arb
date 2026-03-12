@@ -64,8 +64,13 @@ const ASTRALANE_TIP_ACCOUNT: Pubkey = solana_sdk::pubkey!("astra4uejePWneqNaJKuF
 
 /// Derive an Associated Token Account address (PDA)
 fn derive_ata(owner: &Pubkey, mint: &Pubkey) -> Pubkey {
+    derive_ata_with_program(owner, mint, &SPL_TOKEN_PROGRAM_ID)
+}
+
+/// Derive ATA with explicit token program (SPL Token or Token-2022)
+fn derive_ata_with_program(owner: &Pubkey, mint: &Pubkey, token_program: &Pubkey) -> Pubkey {
     Pubkey::find_program_address(
-        &[owner.as_ref(), SPL_TOKEN_PROGRAM_ID.as_ref(), mint.as_ref()],
+        &[owner.as_ref(), token_program.as_ref(), mint.as_ref()],
         &ATA_PROGRAM_ID,
     )
     .0
@@ -368,7 +373,7 @@ impl TxBuilder {
             };
             metas.push(AccountMeta::new_readonly(intermediate_mint, false));   // mint
             metas.push(AccountMeta::new_readonly(token_program, false));       // token program
-            let intermediate_ata = derive_ata(&self.payer_pubkey, &intermediate_mint);
+            let intermediate_ata = derive_ata_with_program(&self.payer_pubkey, &intermediate_mint, &token_program);
             metas.push(AccountMeta::new(intermediate_ata, false));             // user ATA
         }
 
@@ -396,13 +401,15 @@ impl TxBuilder {
         let extra = if snap.accounts.len() > 3 { &snap.accounts[3..] } else { &[] };
 
         // Determine user ATAs for input/output based on direction
-        let (input_mint, output_mint) = if snap.is_a_to_b {
-            (snap.mint_a, snap.mint_b)
+        let (input_mint, output_mint, input_is_2022, output_is_2022) = if snap.is_a_to_b {
+            (snap.mint_a, snap.mint_b, snap.mint_a_is_2022, snap.mint_b_is_2022)
         } else {
-            (snap.mint_b, snap.mint_a)
+            (snap.mint_b, snap.mint_a, snap.mint_b_is_2022, snap.mint_a_is_2022)
         };
-        let user_input_ata = derive_ata(&self.payer_pubkey, &input_mint);
-        let user_output_ata = derive_ata(&self.payer_pubkey, &output_mint);
+        let input_token_prog = if input_is_2022 { TOKEN_2022_PROGRAM_ID } else { SPL_TOKEN_PROGRAM_ID };
+        let output_token_prog = if output_is_2022 { TOKEN_2022_PROGRAM_ID } else { SPL_TOKEN_PROGRAM_ID };
+        let user_input_ata = derive_ata_with_program(&self.payer_pubkey, &input_mint, &input_token_prog);
+        let user_output_ata = derive_ata_with_program(&self.payer_pubkey, &output_mint, &output_token_prog);
         let (input_vault, output_vault) = if snap.is_a_to_b {
             (vault_a.unwrap_or_default(), vault_b.unwrap_or_default())
         } else {
@@ -581,14 +588,13 @@ impl TxBuilder {
                 let _coin_creator = extra.first().copied().unwrap_or_default();
                 let base_mint = snap.mint_a;
                 let quote_mint = snap.mint_b;
-                let user_base_ata = derive_ata(&self.payer_pubkey, &base_mint);
-                let user_quote_ata = derive_ata(&self.payer_pubkey, &quote_mint);
-                let pool_base_vault = vault_a.unwrap_or_default();
-                let pool_quote_vault = vault_b.unwrap_or_default();
-                // protocol_fee_recipient_token_account = ATA(protocol_fee_recipient, quote_mint)
-                let protocol_fee_recipient_ata = derive_ata(&PUMPSWAP_PROTOCOL_FEE_RECIPIENT, &quote_mint);
                 let base_token_prog = if snap.mint_a_is_2022 { TOKEN_2022_PROGRAM_ID } else { SPL_TOKEN_PROGRAM_ID };
                 let quote_token_prog = if snap.mint_b_is_2022 { TOKEN_2022_PROGRAM_ID } else { SPL_TOKEN_PROGRAM_ID };
+                let user_base_ata = derive_ata_with_program(&self.payer_pubkey, &base_mint, &base_token_prog);
+                let user_quote_ata = derive_ata_with_program(&self.payer_pubkey, &quote_mint, &quote_token_prog);
+                let pool_base_vault = vault_a.unwrap_or_default();
+                let pool_quote_vault = vault_b.unwrap_or_default();
+                let protocol_fee_recipient_ata = derive_ata_with_program(&PUMPSWAP_PROTOCOL_FEE_RECIPIENT, &quote_mint, &quote_token_prog);
                 // event_authority PDA: ["__event_authority"]
                 let (event_authority, _) = Pubkey::find_program_address(
                     &[b"__event_authority"],
@@ -600,7 +606,7 @@ impl TxBuilder {
                     &PUMPSWAP_PROGRAM,
                 );
                 // coin_creator_vault_ata = ATA(coin_creator_vault_authority, quote_mint)
-                let coin_creator_vault_ata = derive_ata(&coin_creator_vault_authority, &quote_mint);
+                let coin_creator_vault_ata = derive_ata_with_program(&coin_creator_vault_authority, &quote_mint, &quote_token_prog);
                 // global_volume_accumulator PDA
                 let (global_volume_acc, _) = Pubkey::find_program_address(
                     &[b"global_volume_accumulator"],
@@ -707,7 +713,7 @@ impl TxBuilder {
                     &METEORA_DAMM_V2_PROGRAM,
                 );
                 // referral_token_account: use payer's quote ATA as self-referral (0 fees)
-                let referral_token_account = derive_ata(&self.payer_pubkey, &snap.mint_b);
+                let referral_token_account = derive_ata_with_program(&self.payer_pubkey, &snap.mint_b, &token_b_prog);
                 vec![
                     AccountMeta::new_readonly(pool_authority, false),       // [0] pool_authority
                     AccountMeta::new(pool, false),                          // [1] pool
@@ -740,28 +746,33 @@ impl TxBuilder {
     /// Build create_associated_token_account_idempotent instructions
     /// for base mint and all intermediate mints. Idempotent = no-op if exists.
     fn build_create_ata_ixs(&self, opp: &Opportunity) -> Vec<Instruction> {
-        let mut mints = Vec::new();
+        let mut mints: Vec<(Pubkey, bool)> = Vec::new(); // (mint, is_token_2022)
         let hop_count = opp.route.hops.len();
 
         // Intermediate mints (between hops)
         for i in 1..hop_count {
             let prev = &opp.pool_snapshots[i - 1];
-            let mint = if prev.is_a_to_b { prev.mint_b } else { prev.mint_a };
-            if !mints.contains(&mint) {
-                mints.push(mint);
+            let (mint, is_2022) = if prev.is_a_to_b {
+                (prev.mint_b, prev.mint_b_is_2022)
+            } else {
+                (prev.mint_a, prev.mint_a_is_2022)
+            };
+            if !mints.iter().any(|(m, _)| *m == mint) {
+                mints.push((mint, is_2022));
             }
         }
 
-        mints.iter().map(|mint| {
+        mints.iter().map(|(mint, is_2022)| {
+            let token_program = if *is_2022 { TOKEN_2022_PROGRAM_ID } else { SPL_TOKEN_PROGRAM_ID };
             Instruction {
                 program_id: ATA_PROGRAM_ID,
                 accounts: vec![
                     AccountMeta::new(self.payer_pubkey, true),       // funding
-                    AccountMeta::new(derive_ata(&self.payer_pubkey, mint), false), // ATA
+                    AccountMeta::new(derive_ata_with_program(&self.payer_pubkey, mint, &token_program), false), // ATA
                     AccountMeta::new_readonly(self.payer_pubkey, false), // wallet
                     AccountMeta::new_readonly(*mint, false),         // mint
                     AccountMeta::new_readonly(SYSTEM_PROGRAM_ID, false),
-                    AccountMeta::new_readonly(SPL_TOKEN_PROGRAM_ID, false),
+                    AccountMeta::new_readonly(token_program, false),
                 ],
                 data: vec![1], // 1 = CreateIdempotent
             }
