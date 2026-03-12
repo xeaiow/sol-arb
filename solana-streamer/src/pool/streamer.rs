@@ -124,8 +124,14 @@ impl PoolStreamer {
             return;
         }
 
-        debug!("Discovered new pool: {} ({:?}), waiting for gRPC account data",
+        debug!("Discovered new pool: {} ({:?}), subscribing via gRPC",
             discovered.address, discovered.dex_type);
+
+        // Subscribe to pool account so gRPC pushes its snapshot
+        {
+            let mut pending = self.pending_subscriptions.lock().await;
+            pending.push(discovered.address.to_string());
+        }
 
         self.pending_discoveries.insert(discovered.address, discovered);
     }
