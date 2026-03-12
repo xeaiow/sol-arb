@@ -1,6 +1,6 @@
 use anyhow::Result;
 use solana_sdk::transaction::VersionedTransaction;
-use tonic::transport::Channel;
+use tonic::transport::{Channel, ClientTlsConfig};
 
 pub mod proto {
     pub mod packet {
@@ -36,15 +36,17 @@ impl JitoSender {
         }
     }
 
-    /// Pre-connect gRPC channel at startup (5s timeout).
-    /// Uses connect_lazy so the channel auto-reconnects on h2 errors.
+    /// Connect gRPC channel with TLS at startup.
     pub async fn connect(&mut self) -> Result<()> {
         let channel = Channel::from_shared(self.endpoint.clone())?
+            .tls_config(ClientTlsConfig::new().with_native_roots())?
+            .tcp_nodelay(true)
             .connect_timeout(std::time::Duration::from_secs(5))
             .timeout(std::time::Duration::from_secs(5))
-            .connect_lazy();
+            .connect()
+            .await?;
         self.client = Some(SearcherServiceClient::new(channel));
-        log::info!("Jito gRPC connected (lazy): {}", self.endpoint);
+        log::info!("Jito gRPC connected: {}", self.endpoint);
         Ok(())
     }
 
