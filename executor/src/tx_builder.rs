@@ -783,8 +783,8 @@ impl TxBuilder {
                     &[b"__event_authority"],
                     &METEORA_DAMM_V2_PROGRAM,
                 );
-                // referral_token_account: use payer's quote ATA as self-referral (0 fees)
-                let referral_token_account = derive_ata_with_program(&self.payer_pubkey, &snap.mint_b, &token_b_prog);
+                // referral_token_account: must match the output mint (fee is taken from output side)
+                let referral_token_account = derive_ata_with_program(&self.payer_pubkey, &output_mint, &output_token_prog);
                 vec![
                     AccountMeta::new_readonly(pool_authority, false),       // [0] pool_authority
                     AccountMeta::new(pool, false),                          // [1] pool
