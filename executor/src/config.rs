@@ -31,6 +31,7 @@ pub struct EngineConfigFile {
     pub max_input_sol: Option<f64>,
     pub ternary_iterations: Option<u32>,
     pub probe_amount_sol: Option<f64>,
+    pub max_profit_ratio: Option<f64>,
     pub base_mints: Option<Vec<String>>,
 }
 
@@ -110,6 +111,7 @@ impl ExecutorConfigFile {
             max_input_lamports: ec.max_input_sol.map(sol_to_lamports).unwrap_or(defaults.max_input_lamports),
             ternary_iterations: ec.ternary_iterations.unwrap_or(defaults.ternary_iterations),
             probe_amount_lamports: ec.probe_amount_sol.map(sol_to_lamports).unwrap_or(defaults.probe_amount_lamports),
+            max_profit_ratio: ec.max_profit_ratio.unwrap_or(defaults.max_profit_ratio),
         }
     }
 }

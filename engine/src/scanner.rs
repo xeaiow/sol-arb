@@ -277,6 +277,13 @@ impl Scanner {
             return false;
         }
 
+        // Sanity check: profit/input ratio too high → likely stale/bad data
+        if amount_in > 0 && (profit as f64 / amount_in as f64) > self.config.max_profit_ratio {
+            debug!("Route {:?} suspicious profit_ratio={:.2} (profit={}, in={}, slot {}), skipping",
+                rk.0, profit as f64 / amount_in as f64, profit, amount_in, slot);
+            return false;
+        }
+
         // --- Dedup: skip if same route was recently emitted with >= profit ---
         let key = rk;
         if let Some(&(prev_slot, prev_profit)) = self.recent_emissions.get(&key) {
