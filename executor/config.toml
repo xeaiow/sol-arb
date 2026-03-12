@@ -50,6 +50,7 @@ min_operator_profit_lamports = 5000
 [flashblock]
 enabled = false
 api_key = ""
+cu_price_percentage = 30
 priority_fee_lamports = 100000
 endpoints = [
     "https://fra.flashblock.trade",
@@ -61,6 +62,7 @@ endpoints = [
 [astralane]
 enabled = true
 api_key = "xyz_06iaBUneeAX291ZtQbMoGEMAStUaW9YXyHo2dIrkVSwSZiEspN75RJjTupMN"
+cu_price_percentage = 30
 priority_fee_lamports = 100000
 endpoints = [
     "https://fr.gateway.astralane.io/iris2",
