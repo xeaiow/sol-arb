@@ -25,7 +25,7 @@ impl AstralaneSender {
             tx_bytes.len(), tx_base64.len(), &tx_base64[..40.min(tx_base64.len())]);
 
         let url = format!(
-            "{}?api-key={}&method=sendTransaction",
+            "{}?api-key={}&method=sendTransaction&mev-protect=true",
             self.endpoint, self.api_key,
         );
 
