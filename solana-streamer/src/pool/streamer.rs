@@ -470,8 +470,8 @@ impl PoolStreamer {
             return;
         }
 
-        // Process in chunks of 100 (RPC limit for getMultipleAccounts)
-        for chunk in vaults.chunks(100) {
+        // Process in chunks of 50 (getMultipleAccounts RPC limit)
+        for chunk in vaults.chunks(50) {
             let pubkeys: Vec<Pubkey> = chunk.iter().map(|v| v.vault).collect();
             match self.rpc.get_multiple_accounts(&pubkeys).await {
                 Ok(accounts) => {
