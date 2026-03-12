@@ -36,15 +36,15 @@ impl JitoSender {
         }
     }
 
-    /// Pre-connect gRPC channel at startup (5s timeout)
+    /// Pre-connect gRPC channel at startup (5s timeout).
+    /// Uses connect_lazy so the channel auto-reconnects on h2 errors.
     pub async fn connect(&mut self) -> Result<()> {
         let channel = Channel::from_shared(self.endpoint.clone())?
             .connect_timeout(std::time::Duration::from_secs(5))
             .timeout(std::time::Duration::from_secs(5))
-            .connect()
-            .await?;
+            .connect_lazy();
         self.client = Some(SearcherServiceClient::new(channel));
-        log::info!("Jito gRPC connected: {}", self.endpoint);
+        log::info!("Jito gRPC connected (lazy): {}", self.endpoint);
         Ok(())
     }
 
