@@ -205,10 +205,20 @@ impl RouteTable {
         }
 
         // Deduplicate: only keep routes that actually use the new pool
-        // and weren't already in the table
+        // and aren't already in the table
+        let existing_routes: HashSet<Vec<(u32, bool)>> = self.routes[..routes_before]
+            .iter()
+            .map(|r| r.hops.iter().map(|h| (h.pool_index, h.is_a_to_b)).collect::<Vec<_>>())
+            .collect();
+
         let new_routes: Vec<Route> = self.routes[routes_before..]
             .iter()
-            .filter(|r| r.hops.iter().any(|h| h.pool_index == pool_index))
+            .filter(|r| {
+                r.hops.iter().any(|h| h.pool_index == pool_index) && {
+                    let key: Vec<(u32, bool)> = r.hops.iter().map(|h| (h.pool_index, h.is_a_to_b)).collect();
+                    !existing_routes.contains(&key)
+                }
+            })
             .cloned()
             .collect();
 

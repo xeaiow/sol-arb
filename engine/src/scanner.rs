@@ -82,6 +82,11 @@ impl Scanner {
     }
 
     fn handle_update(&mut self, update: PoolUpdate) {
+        // Detect reserve transition: was the pool previously dead (zero reserves)?
+        let was_dead = self.graph.address_to_pool.get(&update.pool_address)
+            .map(|&idx| self.graph.is_pool_dead(idx))
+            .unwrap_or(false);
+
         // Upsert pool into graph
         let entry = PoolEntry {
             address: update.pool_address,
@@ -99,6 +104,9 @@ impl Scanner {
 
         let is_new = !self.graph.address_to_pool.contains_key(&update.pool_address);
         let pool_index = self.graph.add_pool(entry);
+
+        // Check if pool transitioned from dead to alive (reserves became non-zero)
+        let now_alive = was_dead && !self.graph.is_pool_dead(pool_index);
 
         match &self.phase {
             Phase::Warmup { start } => {
@@ -123,8 +131,9 @@ impl Scanner {
                 }
             }
             Phase::Running => {
-                if is_new {
-                    // New pool: incrementally add routes
+                // Build routes when pool is new OR when it transitions from dead to alive
+                // (e.g., vault balances arrive after initial registration with reserves=0)
+                if is_new || now_alive {
                     let before = self.route_table.route_count();
                     self.route_table.add_routes_for_pool(
                         &self.graph,
@@ -133,8 +142,9 @@ impl Scanner {
                     );
                     let after = self.route_table.route_count();
                     if after > before {
-                        info!("New pool {} added {} routes (total {})",
-                            update.pool_address, after - before, after);
+                        let reason = if now_alive { "revived" } else { "new" };
+                        info!("Pool {} ({}) added {} routes (total {})",
+                            update.pool_address, reason, after - before, after);
                     }
                 }
 
