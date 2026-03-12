@@ -392,19 +392,41 @@ impl Scanner {
         }
         accounts.extend_from_slice(&pool.extra_accounts);
 
-        // CLMM: pass all loaded tick array PDAs (up to 3: left, current, right).
-        // If no tick arrays loaded yet, return empty vec to signal this pool isn't ready.
+        // CLMM: pass tick array PDAs. Raydium CLMM requires the FIRST tick array
+        // to contain tick_current. If no loaded tick array covers current tick,
+        // return empty to signal pool isn't ready (needs tick array reload).
         if pool.dex_type == DexType::RaydiumClmm {
             if let PoolMath::Concentrated { tick_current, tick_spacing, tick_arrays, .. } = &pool.math {
                 if tick_arrays.is_empty() {
                     return vec![];
                 }
-                // Sort tick arrays by distance from current tick (closest first)
+                let ts = *tick_spacing as i32;
+                let ticks_per_array = ts * 60; // 60 ticks per array (Raydium convention)
                 let current_start = raydium_clmm::tick_array_start_index(*tick_current, *tick_spacing);
-                let mut sorted_tas: Vec<_> = tick_arrays.iter().collect();
-                sorted_tas.sort_by_key(|ta| (ta.start_tick_index - current_start).unsigned_abs());
 
-                for ta in sorted_tas.iter().take(3) {
+                // Find the tick array that contains tick_current (must be first)
+                let containing = tick_arrays.iter().find(|ta| {
+                    *tick_current >= ta.start_tick_index
+                        && *tick_current < ta.start_tick_index + ticks_per_array
+                });
+
+                let Some(first_ta) = containing else {
+                    // No tick array covers current tick — pool not ready
+                    return vec![];
+                };
+
+                // First: the containing tick array
+                if let Some(pda) = raydium_clmm::tick_array_pda(&pool.address, first_ta.start_tick_index) {
+                    accounts.push(pda);
+                }
+
+                // Then: remaining tick arrays sorted by distance from current
+                let mut others: Vec<_> = tick_arrays.iter()
+                    .filter(|ta| ta.start_tick_index != first_ta.start_tick_index)
+                    .collect();
+                others.sort_by_key(|ta| (ta.start_tick_index - current_start).unsigned_abs());
+
+                for ta in others.iter().take(2) {
                     if let Some(pda) = raydium_clmm::tick_array_pda(&pool.address, ta.start_tick_index) {
                         accounts.push(pda);
                     }
