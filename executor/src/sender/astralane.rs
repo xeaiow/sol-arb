@@ -24,16 +24,19 @@ impl AstralaneSender {
         log::info!("Astralane tx: {} raw bytes, {} base64 chars, first20={}",
             tx_bytes.len(), tx_base64.len(), &tx_base64[..20.min(tx_base64.len())]);
 
-        let url = format!(
-            "{}?api-key={}&method=sendTransaction",
-            self.endpoint, self.api_key,
-        );
+        let body = serde_json::json!({
+            "jsonrpc": "2.0",
+            "id": 1,
+            "method": "sendTransaction",
+            "params": [tx_base64, {"encoding": "base64", "skipPreflight": true}]
+        });
 
         let resp = self
             .client
-            .post(&url)
-            .header("Content-Type", "text/plain")
-            .body(tx_base64)
+            .post(&self.endpoint)
+            .header("Content-Type", "application/json")
+            .header("api_key", &self.api_key)
+            .json(&body)
             .send()
             .await?;
 
