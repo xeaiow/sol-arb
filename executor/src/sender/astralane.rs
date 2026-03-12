@@ -21,6 +21,8 @@ impl AstralaneSender {
     pub async fn send_transaction(&self, tx: &VersionedTransaction) -> Result<()> {
         let tx_bytes = bincode::serialize(tx)?;
         let tx_base64 = base64::engine::general_purpose::STANDARD.encode(&tx_bytes);
+        log::info!("Astralane tx: {} raw bytes, {} b64 chars, body_first40=[{}]",
+            tx_bytes.len(), tx_base64.len(), &tx_base64[..40.min(tx_base64.len())]);
 
         let url = format!(
             "{}?api-key={}&method=sendTransaction",
