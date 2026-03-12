@@ -1,6 +1,7 @@
 use std::collections::HashMap;
 use std::time::Instant;
 use log::{info, debug};
+use rayon::prelude::*;
 use solana_sdk::pubkey::Pubkey;
 use tokio::sync::mpsc;
 
@@ -154,20 +155,87 @@ impl Scanner {
         }
     }
 
-    /// Scan routes affected by a specific pool update
+    /// Scan routes affected by a specific pool update.
+    /// Uses parallel probe → sort → parallel ternary → emit best.
     fn scan_routes_for_pool(&mut self, pool_index: u32, slot: u64) {
         let route_indices = self.route_table.index.routes_for_pool(pool_index);
-        // Collect indices to avoid borrow conflict
         let indices: Vec<u32> = route_indices.to_vec();
 
-        if !indices.is_empty() {
-            debug!("Incremental scan: pool {} triggered {} routes (slot {})",
-                pool_index, indices.len(), slot);
+        if indices.is_empty() {
+            return;
         }
 
-        for route_idx in indices {
-            let route = self.route_table.routes[route_idx as usize].clone();
-            self.evaluate_route(&route, slot);
+        debug!("Incremental scan: pool {} triggered {} routes (slot {})",
+            pool_index, indices.len(), slot);
+
+        // Collect routes (clone to release borrow on route_table)
+        let routes: Vec<(u32, Route)> = indices.iter()
+            .map(|&idx| (idx, self.route_table.routes[idx as usize].clone()))
+            .collect();
+
+        // Phase 1: parallel probe — filter and rank routes by probe profit
+        let probe_amount = self.config.probe_amount_lamports;
+        let min_reserve = self.config.min_reserve_lamports;
+        let graph = &self.graph;
+
+        let mut probed: Vec<(u32, Route, i64)> = routes.into_par_iter()
+            .filter_map(|(idx, route)| {
+                // Quick reserve check
+                for hop in &route.hops {
+                    if !graph.pool_has_min_reserve(hop.pool_index, min_reserve) {
+                        return None;
+                    }
+                }
+                let probe_profit = optimizer::simulate_route_profit(&route, graph, probe_amount);
+                if probe_profit > 0 {
+                    Some((idx, route, probe_profit))
+                } else {
+                    None
+                }
+            })
+            .collect();
+
+        if probed.is_empty() {
+            return;
+        }
+
+        // Sort by probe profit descending — best candidates first
+        probed.sort_unstable_by(|a, b| b.2.cmp(&a.2));
+
+        // Phase 2: parallel ternary search on top candidates (cap to avoid wasted work)
+        let top_n = probed.len().min(10);
+        let top_candidates = &probed[..top_n];
+
+        let max_input = self.config.max_input_lamports;
+        let ternary_iters = self.config.ternary_iterations;
+        let min_profit = self.config.min_profit_lamports;
+        let max_profit_ratio = self.config.max_profit_ratio;
+
+        let mut evaluated: Vec<(Route, u64, u64)> = top_candidates.par_iter()
+            .filter_map(|(_, route, _)| {
+                let (amount_in, profit) = optimizer::find_optimal_amount(
+                    route, graph, max_input, ternary_iters,
+                )?;
+                if profit < min_profit {
+                    return None;
+                }
+                if amount_in > 0 && (profit as f64 / amount_in as f64) > max_profit_ratio {
+                    return None;
+                }
+                Some((route.clone(), amount_in, profit))
+            })
+            .collect();
+
+        if evaluated.is_empty() {
+            return;
+        }
+
+        // Sort by profit descending — emit best first
+        evaluated.sort_unstable_by(|a, b| b.2.cmp(&a.2));
+
+        // Phase 3: emit opportunities (sequential — needs &mut self for dedup + channel)
+        for (route, amount_in, profit) in evaluated {
+            self.emit_opportunity(&route, slot, amount_in, profit);
         }
     }
 
@@ -248,56 +316,12 @@ impl Scanner {
         );
     }
 
-    /// Evaluate a single route. Returns true if an Opportunity was emitted.
-    fn evaluate_route(&mut self, route: &Route, slot: u64) -> bool {
-        let rk = route_key(route);
+    /// Emit a pre-evaluated opportunity. Handles dedup and snapshot building.
+    fn emit_opportunity(&mut self, route: &Route, slot: u64, amount_in: u64, profit: u64) -> bool {
+        let key = route_key(route);
 
-        // Skip routes with pools below minimum reserve
-        for hop in &route.hops {
-            if !self.graph.pool_has_min_reserve(hop.pool_index, self.config.min_reserve_lamports) {
-                return false;
-            }
-        }
-
-        // Quick probe
-        let probe_profit = optimizer::simulate_route_profit(
-            route,
-            &self.graph,
-            self.config.probe_amount_lamports,
-        );
-        if probe_profit <= 0 {
-            return false;
-        }
-
-        // Ternary search for optimal amount
-        let Some((amount_in, profit)) = optimizer::find_optimal_amount(
-            route,
-            &self.graph,
-            self.config.max_input_lamports,
-            self.config.ternary_iterations,
-        ) else {
-            debug!("Route {:?} probe_profit={} but ternary failed (slot {})",
-                rk.0, probe_profit, slot);
-            return false;
-        };
-
-        if profit < self.config.min_profit_lamports {
-            debug!("Route {:?} profit={} < min={} (slot {})",
-                rk.0, profit, self.config.min_profit_lamports, slot);
-            return false;
-        }
-
-        // Sanity check: profit/input ratio too high → likely stale/bad data
-        if amount_in > 0 && (profit as f64 / amount_in as f64) > self.config.max_profit_ratio {
-            debug!("Route {:?} suspicious profit_ratio={:.2} (profit={}, in={}, slot {}), skipping",
-                rk.0, profit as f64 / amount_in as f64, profit, amount_in, slot);
-            return false;
-        }
-
-        // --- Dedup: skip if same route was recently emitted with >= profit ---
-        let key = rk;
+        // Dedup: skip if same route was recently emitted with >= profit
         if let Some(&(prev_slot, prev_profit)) = self.recent_emissions.get(&key) {
-            // Same slot or next slot: only re-emit if profit increased by >10%
             if slot <= prev_slot + 1 && profit <= prev_profit + prev_profit / 10 {
                 debug!("Route {:?} dedup: profit={} vs prev={} (slot {} vs {})",
                     key.0, profit, prev_profit, slot, prev_slot);
@@ -316,7 +340,6 @@ impl Scanner {
             }
             let accounts = Self::build_pool_accounts(pool, hop.is_a_to_b);
             if accounts.is_empty() {
-                // Pool not ready (e.g. CLMM without tick arrays loaded)
                 return false;
             }
             pool_snapshots.push(PoolSnapshot {
