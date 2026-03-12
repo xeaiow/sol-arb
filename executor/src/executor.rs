@@ -140,16 +140,24 @@ impl Executor {
                 continue;
             }
 
-            // Update blockhash from gRPC (no RPC needed)
-            if let Some(ref sbh) = self.shared_blockhash {
+            // Update blockhash: try gRPC first, fallback to RPC
+            let got_grpc_blockhash = if let Some(ref sbh) = self.shared_blockhash {
                 if let Ok(bh) = sbh.try_read() {
                     if let Some(h) = *bh {
                         recent_blockhash = h;
+                        true
+                    } else {
+                        false
                     }
+                } else {
+                    false
                 }
             } else {
-                // Fallback: RPC polling every 100 slots
-                const BLOCKHASH_REFRESH_SLOTS: u64 = 100;
+                false
+            };
+
+            if !got_grpc_blockhash {
+                const BLOCKHASH_REFRESH_SLOTS: u64 = 50;
                 if latest_slot.saturating_sub(blockhash_slot) >= BLOCKHASH_REFRESH_SLOTS {
                     match self.rpc.get_latest_blockhash().await {
                         Ok(bh) => {
