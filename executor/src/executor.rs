@@ -191,6 +191,11 @@ impl Executor {
                 );
             }
 
+            // Skip if no tx was built (e.g. cross-hop conflict)
+            if pair.jito_tx.is_none() && pair.swqos_tx.is_none() {
+                continue;
+            }
+
             // Test mode: send and wait, then exit
             if self.tx_builder.test_mode {
                 let build_us = t_start.elapsed().as_micros();
