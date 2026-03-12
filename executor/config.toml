@@ -1,6 +1,6 @@
 [general]
 keypair_path = "~/.config/solana/id.json"
-rpc_url = "https://mainnet.helius-rpc.com/?api-key=89ed37ec-971c-48e0-99db-921d568354e6"
+rpc_url = "https://beta.helius-rpc.com/?api-key=89ed37ec-971c-48e0-99db-921d568354e6"
 grpc_endpoint = "https://solana-yellowstone-grpc.publicnode.com:443"
 grpc_token = "a8be362b3dad184ed061a9b23a11b180d1551146c82f60c0ae12ffaf51b66a55"
 log_level = "info,arb_engine::scanner=debug,solana_streamer_sdk::pool::streamer=debug"
@@ -16,14 +16,14 @@ min_profit_sol = 0.0001
 max_input_sol = 100.0
 ternary_iterations = 10
 probe_amount_sol = 1.0
-max_profit_ratio = 100
+max_profit_ratio = 50
 # base_mints = ["So11111111111111111111111111111111111111112", "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v"]
 
 [executor]
 flashloan_enabled = true
 program_id = "8NwGVcMu96JTJwfUKQNXjYMd87JyGWcPkaENe9NPzLCV"
 alt_address = "Eppmrwxw2nY6PbKdG8ANUA3EarHJSoXpfDa2u4euCyWu"
-fallback_rpc_url = "https://mainnet.helius-rpc.com/?api-key=89ed37ec-971c-48e0-99db-921d578354e6"
+fallback_rpc_url = "https://beta.helius-rpc.com/?api-key=89ed37ec-971c-48e0-99db-921d568354e6"
 
 [executor.anti_fingerprint]
 cu_jitter_range = 1000
@@ -50,7 +50,7 @@ min_operator_profit_lamports = 5000
 [flashblock]
 enabled = false
 api_key = ""
-cu_price_percentage = 30
+priority_fee_lamports = 100000
 endpoints = [
     "https://fra.flashblock.trade",
     "https://ams.flashblock.trade",
@@ -61,7 +61,7 @@ endpoints = [
 [astralane]
 enabled = true
 api_key = "xyz_06iaBUneeAX291ZtQbMoGEMAStUaW9YXyHo2dIrkVSwSZiEspN75RJjTupMN"
-cu_price_percentage = 30
+priority_fee_lamports = 100000
 endpoints = [
     "https://fr.gateway.astralane.io/iris2",
     "https://fr2.gateway.astralane.io/iris2",

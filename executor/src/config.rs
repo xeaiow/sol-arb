@@ -63,7 +63,8 @@ pub struct JitoConfig {
 pub struct FlashblockConfig {
     pub enabled: bool,
     pub api_key: String,
-    pub cu_price_percentage: u32,
+    /// Fixed priority fee in lamports (default 100_000 = 0.0001 SOL)
+    pub priority_fee_lamports: Option<u64>,
     pub endpoints: Vec<String>,
 }
 
@@ -71,7 +72,8 @@ pub struct FlashblockConfig {
 pub struct AstralaneConfig {
     pub enabled: bool,
     pub api_key: String,
-    pub cu_price_percentage: u32,
+    /// Fixed priority fee in lamports (default 100_000 = 0.0001 SOL)
+    pub priority_fee_lamports: Option<u64>,
     pub endpoints: Vec<String>,
 }
 

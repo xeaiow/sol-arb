@@ -90,7 +90,7 @@ pub struct TxBuilder {
     jito_tip_percentage: u32,
     jito_min_tip: u64,
     jito_min_operator_profit: u64,
-    swqos_cu_price_percentage: u32,
+    swqos_priority_fee: u64,
     jito_enabled: bool,
     swqos_enabled: bool,
     alt: Option<Arc<Tier0Alt>>,
@@ -115,16 +115,13 @@ impl TxBuilder {
         let flashblock_enabled = config.flashblock.as_ref().map_or(false, |f| f.enabled);
         let astralane_enabled = config.astralane.as_ref().map_or(false, |a| a.enabled);
 
-        let swqos_pct = config
+        // Fixed priority fee: take from flashblock or astralane config, default 100k lamports (0.0001 SOL)
+        let swqos_fee = config
             .flashblock
             .as_ref()
-            .map_or(30, |f| f.cu_price_percentage)
-            .max(
-                config
-                    .astralane
-                    .as_ref()
-                    .map_or(30, |a| a.cu_price_percentage),
-            );
+            .and_then(|f| f.priority_fee_lamports)
+            .or_else(|| config.astralane.as_ref().and_then(|a| a.priority_fee_lamports))
+            .unwrap_or(100_000);
 
         Self {
             program_id: config.executor.program_id.parse()
@@ -135,7 +132,7 @@ impl TxBuilder {
             jito_tip_percentage: jito.map_or(60, |j| j.tip_percentage),
             jito_min_tip: jito.map_or(1000, |j| j.min_tip_lamports),
             jito_min_operator_profit: jito.map_or(5000, |j| j.min_operator_profit_lamports),
-            swqos_cu_price_percentage: swqos_pct,
+            swqos_priority_fee: swqos_fee,
             jito_enabled,
             swqos_enabled: flashblock_enabled || astralane_enabled,
             alt: None,
@@ -223,6 +220,13 @@ impl TxBuilder {
 
         let swqos_ixs = if self.swqos_enabled {
             let cu_price = self.calculate_cu_price(opp.expected_profit, base_cu);
+            let total_priority_fee = cu_price * cu_limit as u64 / 1_000_000;
+            log::debug!(
+                "SwQoS tx: expected_profit={:.6} SOL, priority_fee={:.6} SOL, cu_price={}, cu_limit={}",
+                opp.expected_profit as f64 / 1e9,
+                total_priority_fee as f64 / 1e9,
+                cu_price, cu_limit,
+            );
             // Astralane requires a SOL transfer tip (min 10000 lamports = 0.00001 SOL)
             let astralane_tip: u64 = 10_000;
             let mut ixs = vec![
@@ -770,11 +774,8 @@ impl TxBuilder {
             //  token_a_program, token_b_program, referral_token_account,
             //  event_authority, program]
             DexType::MeteoraDammV2 => {
-                // pool_authority PDA: seeds depend on Meteora impl; commonly ["pool_authority", pool]
-                let (pool_authority, _) = Pubkey::find_program_address(
-                    &[b"pool_authority", pool.as_ref()],
-                    &METEORA_DAMM_V2_PROGRAM,
-                );
+                // pool_authority is a fixed global address (from IDL: address constraint)
+                let pool_authority: Pubkey = solana_sdk::pubkey!("HLnpSz9h2S4hiLQ43rnSD9XkcUThA7B8hQMKmDaiTLcC");
                 let token_a_prog = if snap.mint_a_is_2022 { TOKEN_2022_PROGRAM_ID } else { SPL_TOKEN_PROGRAM_ID };
                 let token_b_prog = if snap.mint_b_is_2022 { TOKEN_2022_PROGRAM_ID } else { SPL_TOKEN_PROGRAM_ID };
                 // event_authority PDA
@@ -900,13 +901,10 @@ impl TxBuilder {
         Some(FlashloanIxs { start, start_jito, borrow, repay, end })
     }
 
-    fn calculate_cu_price(&self, expected_profit: u64, base_cu: u32) -> u64 {
-        // Minimum total priority fee = 10000 lamports (Astralane/SWQoS requirement)
-        let min_total_fee: u64 = 10_000;
-        let fee_budget = (expected_profit * self.swqos_cu_price_percentage as u64 / 100)
-            .max(min_total_fee);
-        // micro-lamports per CU
-        (fee_budget * 1_000_000) / base_cu as u64
+    fn calculate_cu_price(&self, _expected_profit: u64, base_cu: u32) -> u64 {
+        // Fixed priority fee — do not scale with expected_profit.
+        // SwQoS failed txs still land on-chain and pay fees, so keep it fixed and low.
+        (self.swqos_priority_fee * 1_000_000) / base_cu as u64
     }
 }
 
