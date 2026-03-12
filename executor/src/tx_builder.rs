@@ -176,6 +176,13 @@ impl TxBuilder {
         }
         let cu_limit = anti_fp::jittered_cu(base_cu, self.cu_jitter_range);
 
+        // Check for cross-hop shared writable accounts within same CPI program.
+        // Same program CPI'd twice with same writable account → AccountBorrowFailed.
+        if self.has_cross_hop_borrow_conflict(opp) {
+            log::debug!("Skipping opportunity: cross-hop writable account conflict");
+            return TxPair { jito_tx: None, swqos_tx: None };
+        }
+
         let arb_ix = self.build_arb_instruction(opp);
 
         // If accounts are empty (missing required data), return empty TxPair
@@ -741,6 +748,40 @@ impl TxBuilder {
             return None; // Not profitable enough
         }
         Some(tip)
+    }
+
+    /// Check if any two hops share writable accounts AND the same CPI program.
+    /// This would cause AccountBorrowFailed at runtime.
+    fn has_cross_hop_borrow_conflict(&self, opp: &Opportunity) -> bool {
+        let hop_count = opp.pool_snapshots.len();
+        if hop_count < 2 {
+            return false;
+        }
+
+        // Build per-hop writable account sets
+        let hop_accounts: Vec<Vec<AccountMeta>> = opp.pool_snapshots.iter()
+            .map(|snap| self.build_hop_accounts(snap))
+            .collect();
+
+        for i in 0..hop_count {
+            for j in (i + 1)..hop_count {
+                // Only conflict if same CPI program
+                if opp.pool_snapshots[i].dex_type != opp.pool_snapshots[j].dex_type {
+                    continue;
+                }
+                // Check writable account intersection
+                let writable_i: Vec<&Pubkey> = hop_accounts[i].iter()
+                    .filter(|m| m.is_writable)
+                    .map(|m| &m.pubkey)
+                    .collect();
+                let has_conflict = hop_accounts[j].iter()
+                    .any(|m| m.is_writable && writable_i.contains(&&m.pubkey));
+                if has_conflict {
+                    return true;
+                }
+            }
+        }
+        false
     }
 
     /// Build create_associated_token_account_idempotent instructions
