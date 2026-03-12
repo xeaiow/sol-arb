@@ -65,6 +65,8 @@ pub struct FlashblockConfig {
     pub api_key: String,
     /// Fixed priority fee in lamports (default 100_000 = 0.0001 SOL)
     pub priority_fee_lamports: Option<u64>,
+    /// Deprecated: kept for config.toml backward compatibility
+    pub cu_price_percentage: Option<u32>,
     pub endpoints: Vec<String>,
 }
 
@@ -74,6 +76,8 @@ pub struct AstralaneConfig {
     pub api_key: String,
     /// Fixed priority fee in lamports (default 100_000 = 0.0001 SOL)
     pub priority_fee_lamports: Option<u64>,
+    /// Deprecated: kept for config.toml backward compatibility
+    pub cu_price_percentage: Option<u32>,
     pub endpoints: Vec<String>,
 }
 
