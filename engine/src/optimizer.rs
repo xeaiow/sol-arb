@@ -299,6 +299,21 @@ fn closed_form_clmm_clmm(
 // Dispatch
 // ---------------------------------------------------------------------------
 
+/// If the first hop is CLMM, cap input to the tick-boundary limit so we don't
+/// need more tick arrays than loaded. For mid-hops we rely on get_amount_out
+/// naturally capping output within loaded tick ranges.
+fn clmm_cap_input(route: &Route, graph: &TokenGraph, max_amount: u64) -> u64 {
+    let hop = &route.hops[0];
+    let pool = &graph.pools[hop.pool_index as usize];
+    if let PoolMath::Concentrated { limit_in_a, limit_in_b, .. } = &pool.math {
+        let limit = if hop.is_a_to_b { *limit_in_a } else { *limit_in_b };
+        if limit > 0 && limit < max_amount {
+            return limit;
+        }
+    }
+    max_amount
+}
+
 /// Find optimal input amount for a route. For 2-hop routes, uses closed-form
 /// formulas with ternary search fallback. For 3-hop+, uses ternary search.
 pub fn find_optimal_amount(
@@ -307,6 +322,10 @@ pub fn find_optimal_amount(
     max_amount: u64,
     iterations: u32,
 ) -> Option<(u64, u64)> {
+    // Cap input by first-hop CLMM limit to avoid crossing more tick arrays
+    // than we have loaded (on-chain swap will fail with NotEnoughTickArrayAccount)
+    let max_amount = clmm_cap_input(route, graph, max_amount);
+
     // 2-hop: try closed-form first
     if route.hops.len() == 2 {
         if let Some((amount_in, cf_profit)) = try_closed_form(route, graph, max_amount) {
