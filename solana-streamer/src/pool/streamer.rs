@@ -34,6 +34,12 @@ struct PendingVault {
     is_vault_a: bool,
 }
 
+/// Cached PumpSwap fee rates (fetched once from GlobalConfig)
+struct PumpSwapFees {
+    /// Total fee in basis points (lp_fee + protocol_fee)
+    total_fee_bps: u64,
+}
+
 /// Main pool streamer — integrates discovery, decoding, and caching
 pub struct PoolStreamer {
     cache: Arc<PoolStateCache>,
@@ -47,6 +53,8 @@ pub struct PoolStreamer {
     latest_blockhash: Arc<tokio::sync::RwLock<Option<Hash>>>,
     /// Slot of the latest blockhash
     latest_blockhash_slot: Arc<AtomicU64>,
+    /// Cached PumpSwap GlobalConfig fee rates
+    pumpswap_fees: tokio::sync::OnceCell<PumpSwapFees>,
 }
 
 impl PoolStreamer {
@@ -63,6 +71,7 @@ impl PoolStreamer {
             pending_discoveries: DashMap::new(),
             latest_blockhash: Arc::new(tokio::sync::RwLock::new(None)),
             latest_blockhash_slot: Arc::new(AtomicU64::new(0)),
+            pumpswap_fees: tokio::sync::OnceCell::new(),
         };
 
         (streamer, update_rx)
@@ -199,6 +208,16 @@ impl PoolStreamer {
             self.fetch_clmm_extras(&addr, &mut pool_state).await;
         }
 
+        // For CPMM pools: fetch AmmConfig trade_fee_rate (extra_accounts[0] = amm_config)
+        if pool_state.dex_type == DexType::RaydiumCpmm {
+            self.fetch_cpmm_fee(&mut pool_state).await;
+        }
+
+        // For PumpSwap pools: apply cached GlobalConfig fee rates
+        if pool_state.dex_type == DexType::PumpSwap {
+            self.apply_pumpswap_fee(&mut pool_state).await;
+        }
+
         // Insert pool immediately (reserve may be 0).
         // Engine's reserve transition detection will build routes once balances arrive.
         self.cache.insert(pool_state.clone());
@@ -288,6 +307,85 @@ impl PoolStreamer {
         );
     }
 
+    /// Apply PumpSwap fee rates from cached GlobalConfig.
+    /// Fetches GlobalConfig once on first PumpSwap pool registration.
+    async fn apply_pumpswap_fee(&self, pool_state: &mut PoolState) {
+        const PUMPSWAP_GLOBAL_CONFIG: Pubkey =
+            solana_sdk::pubkey!("ADyA8hdefvWN2dbGGWFotbzWxrAvLW83WG6QCVXvJKqw");
+
+        let fees = self.pumpswap_fees.get_or_init(|| async {
+            match self.rpc.get_account_data(&PUMPSWAP_GLOBAL_CONFIG).await {
+                Ok(data) => {
+                    use crate::streaming::event_parser::protocols::pumpswap::types::{
+                        global_config_decode, GLOBAL_CONFIG_SIZE,
+                    };
+                    if data.len() >= GLOBAL_CONFIG_SIZE + 8 {
+                        if let Some(config) = global_config_decode(&data[8..GLOBAL_CONFIG_SIZE + 8]) {
+                            let total = config.lp_fee_basis_points + config.protocol_fee_basis_points;
+                            info!("PumpSwap GlobalConfig: lp_fee={}bps, protocol_fee={}bps, total={}bps",
+                                config.lp_fee_basis_points, config.protocol_fee_basis_points, total);
+                            return PumpSwapFees { total_fee_bps: total };
+                        }
+                    }
+                    info!("PumpSwap GlobalConfig decode failed, using default 200bps");
+                    PumpSwapFees { total_fee_bps: 200 }
+                }
+                Err(e) => {
+                    info!("PumpSwap GlobalConfig fetch failed: {}, using default 200bps", e);
+                    PumpSwapFees { total_fee_bps: 200 }
+                }
+            }
+        }).await;
+
+        if let PoolMath::ConstantProduct {
+            ref mut fee_numerator,
+            ref mut fee_denominator,
+            ..
+        } = pool_state.math {
+            *fee_numerator = fees.total_fee_bps;
+            *fee_denominator = 10000;
+        }
+    }
+
+    /// Fetch AmmConfig trade_fee_rate for a CPMM pool.
+    /// The amm_config address is stored in extra_accounts[0].
+    async fn fetch_cpmm_fee(&self, pool_state: &mut PoolState) {
+        let amm_config_addr = match pool_state.extra_accounts.first() {
+            Some(addr) => *addr,
+            None => return,
+        };
+
+        match self.rpc.get_account_data(&amm_config_addr).await {
+            Ok(data) => {
+                use crate::streaming::event_parser::protocols::raydium_cpmm::types::{
+                    amm_config_decode, AMM_CONFIG_SIZE,
+                };
+                if data.len() >= AMM_CONFIG_SIZE + 8 {
+                    if let Some(config) = amm_config_decode(&data[8..AMM_CONFIG_SIZE + 8]) {
+                        // trade_fee_rate is in 1e-6 units (e.g. 2500 = 0.25%)
+                        // Convert to fee_numerator/fee_denominator
+                        if let PoolMath::ConstantProduct {
+                            ref mut fee_numerator,
+                            ref mut fee_denominator,
+                            ..
+                        } = pool_state.math {
+                            *fee_numerator = config.trade_fee_rate;
+                            *fee_denominator = 1_000_000;
+                        }
+                        debug!(
+                            "CPMM {} fee_rate={} ({}bps)",
+                            pool_state.address, config.trade_fee_rate,
+                            config.trade_fee_rate / 100,
+                        );
+                    }
+                }
+            }
+            Err(e) => {
+                debug!("CPMM AmmConfig fetch failed for {}: {}", amm_config_addr, e);
+            }
+        }
+    }
+
     /// Process pending tick array reload requests (call periodically from main loop).
     /// Fetches new tick arrays for CLMM pools where tick_current moved out of range.
     pub async fn flush_tick_reloads(&self) {
@@ -326,7 +424,11 @@ impl PoolStreamer {
                     "CLMM {} tick array reload: {} loaded (tick={})",
                     req.pool_address, new_tick_arrays.len(), req.tick_current
                 );
-                self.cache.replace_tick_arrays(&req.pool_address, new_tick_arrays, 0);
+                // Use the pool's existing slot (not 0) to avoid dedup issues in scanner
+                let reload_slot = self.cache.get(&req.pool_address)
+                    .map(|p| p.last_updated_slot)
+                    .unwrap_or(1);
+                self.cache.replace_tick_arrays(&req.pool_address, new_tick_arrays, reload_slot);
             }
         }
     }

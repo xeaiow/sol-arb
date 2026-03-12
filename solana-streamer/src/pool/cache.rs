@@ -119,6 +119,21 @@ impl PoolStateCache {
                     limit_in_a: limit_a,
                     limit_in_b: limit_b,
                 }
+            } else if let (
+                PoolMath::ConstantProduct { reserve_a: existing_a, reserve_b: existing_b, .. },
+                PoolMath::ConstantProduct { fee_numerator, fee_denominator, reserve_a: new_a, reserve_b: new_b, .. },
+            ) = (&pool.math, &math) {
+                // CP pools (AMM V4, CPMM, PumpSwap, Meteora): decoders emit reserves=0.
+                // Preserve existing vault-balance-derived reserves unless the new math
+                // has non-zero reserves (e.g. Bonk which reads reserves from pool account).
+                let ra = if *new_a != 0 { *new_a } else { *existing_a };
+                let rb = if *new_b != 0 { *new_b } else { *existing_b };
+                PoolMath::ConstantProduct {
+                    reserve_a: ra,
+                    reserve_b: rb,
+                    fee_numerator: *fee_numerator,
+                    fee_denominator: *fee_denominator,
+                }
             } else {
                 math
             };
