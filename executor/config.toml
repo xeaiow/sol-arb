@@ -23,6 +23,7 @@ max_profit_ratio = 100
 flashloan_enabled = true
 program_id = "8NwGVcMu96JTJwfUKQNXjYMd87JyGWcPkaENe9NPzLCV"
 alt_address = "Eppmrwxw2nY6PbKdG8ANUA3EarHJSoXpfDa2u4euCyWu"
+fallback_rpc_url = "https://mainnet.helius-rpc.com/?api-key=89ed37ec-971c-48e0-99db-921d578354e6"
 
 [executor.anti_fingerprint]
 cu_jitter_range = 1000

@@ -40,6 +40,7 @@ pub struct ExecutorConfig {
     pub flashloan_enabled: bool,
     pub program_id: String,
     pub alt_address: String,
+    pub fallback_rpc_url: Option<String>,
     pub anti_fingerprint: AntiFingerprint,
 }
 

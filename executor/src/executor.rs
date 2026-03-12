@@ -66,7 +66,10 @@ impl Executor {
 
         // Pre-initialize MarginFi state (if flashloan enabled)
         let marginfi_state = if config.executor.flashloan_enabled {
-            let state = MarginFiState::init(&rpc, &payer_pubkey)
+            let marginfi_rpc = config.executor.fallback_rpc_url.as_ref()
+                .map(|url| Arc::new(RpcClient::new(url.clone())))
+                .unwrap_or_else(|| rpc.clone());
+            let state = MarginFiState::init(&marginfi_rpc, &payer_pubkey)
                 .await
                 .map_err(|e| anyhow::anyhow!(
                     "flashloan_enabled=true but MarginFi init failed: {}. \
