@@ -127,7 +127,7 @@ fn parse_2hop_token_2022_flags() {
 fn dex_type_roundtrip() {
     for i in 0..=6u8 {
         let dex = DexType::from_u8(i).unwrap();
-        assert!(dex.pool_account_count() > 0);
+        assert!(dex.base_pool_account_count() > 0);
     }
     assert!(DexType::from_u8(7).is_err());
     assert!(DexType::from_u8(255).is_err());
@@ -135,13 +135,13 @@ fn dex_type_roundtrip() {
 
 #[test]
 fn pool_account_counts() {
-    assert_eq!(DexType::RaydiumAmmV4.pool_account_count(), 8);
-    assert_eq!(DexType::RaydiumCpmm.pool_account_count(), 13);
-    assert_eq!(DexType::RaydiumClmm.pool_account_count(), 14);
-    assert_eq!(DexType::PumpFun.pool_account_count(), 16);
-    assert_eq!(DexType::PumpSwap.pool_account_count(), 23);
-    assert_eq!(DexType::Bonk.pool_account_count(), 17);
-    assert_eq!(DexType::MeteoraDammV2.pool_account_count(), 14);
+    assert_eq!(DexType::RaydiumAmmV4.base_pool_account_count(), 9);
+    assert_eq!(DexType::RaydiumCpmm.base_pool_account_count(), 14);
+    assert_eq!(DexType::RaydiumClmm.base_pool_account_count(), 10);
+    assert_eq!(DexType::PumpFun.base_pool_account_count(), 16);
+    assert_eq!(DexType::PumpSwap.base_pool_account_count(), 23);
+    assert_eq!(DexType::Bonk.base_pool_account_count(), 17);
+    assert_eq!(DexType::MeteoraDammV2.base_pool_account_count(), 14);
 }
 
 // ── pool_accounts_start tests ──
@@ -151,6 +151,7 @@ fn make_hop(dex: DexType) -> HopInfo {
         dex_type: dex,
         is_a_to_b: false,
         is_token_2022: false,
+        extra_accounts: 0,
     }
 }
 
@@ -166,8 +167,8 @@ fn default_hops() -> [HopInfo; 4] {
 #[test]
 fn pool_accounts_start_2hop() {
     let hops = [
-        make_hop(DexType::RaydiumAmmV4), // 8 accounts
-        make_hop(DexType::RaydiumCpmm),   // 13 accounts
+        make_hop(DexType::RaydiumAmmV4), // 9 accounts
+        make_hop(DexType::RaydiumCpmm),   // 14 accounts
         make_hop(DexType::RaydiumAmmV4),
         make_hop(DexType::RaydiumAmmV4),
     ];
@@ -176,7 +177,7 @@ fn pool_accounts_start_2hop() {
     assert_eq!(start0, 8 + 3); // 11
 
     let start1 = pool_accounts_start(2, 1, &hops);
-    assert_eq!(start1, 11 + 8); // 19 (after hop0's 8 accounts)
+    assert_eq!(start1, 11 + 9); // 20 (after hop0's 9 accounts)
 }
 
 #[test]
@@ -201,9 +202,9 @@ fn pool_accounts_start_3hop() {
 #[test]
 fn pool_accounts_start_4hop() {
     let hops = [
-        make_hop(DexType::RaydiumAmmV4),  // 8
-        make_hop(DexType::RaydiumCpmm),   // 13
-        make_hop(DexType::RaydiumClmm),   // 14
+        make_hop(DexType::RaydiumAmmV4),  // 9
+        make_hop(DexType::RaydiumCpmm),   // 14
+        make_hop(DexType::RaydiumClmm),   // 10
         make_hop(DexType::PumpSwap),      // 23
     ];
     // 4-hop: header(8) + 3 intermediates(9) = 17
@@ -211,13 +212,13 @@ fn pool_accounts_start_4hop() {
     assert_eq!(start0, 8 + 9); // 17
 
     let start1 = pool_accounts_start(4, 1, &hops);
-    assert_eq!(start1, 17 + 8); // 25
+    assert_eq!(start1, 17 + 9); // 26
 
     let start2 = pool_accounts_start(4, 2, &hops);
-    assert_eq!(start2, 25 + 13); // 38
+    assert_eq!(start2, 26 + 14); // 40
 
     let start3 = pool_accounts_start(4, 3, &hops);
-    assert_eq!(start3, 38 + 14); // 52
+    assert_eq!(start3, 40 + 10); // 50
 }
 
 // ── Dispatch (process_instruction) tests ──

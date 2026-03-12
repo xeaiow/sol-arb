@@ -24,7 +24,7 @@ pub fn execute(
     for i in 0..ix.hop_count {
         let hop = &ix.hops[i as usize];
         let pool_start = pool_accounts_start(ix.hop_count, i, &ix.hops);
-        let pool_end = pool_start + hop.dex_type.pool_account_count();
+        let pool_end = pool_start + hop.dex_type.base_pool_account_count() + hop.extra_accounts as usize;
 
         if pool_end > accounts.len() {
             return Err(ProgramError::NotEnoughAccountKeys);
@@ -60,7 +60,7 @@ pub fn execute_test(
     for i in 0..ix.hop_count {
         let hop = &ix.hops[i as usize];
         let pool_start = pool_accounts_start(ix.hop_count, i, &ix.hops);
-        let pool_end = pool_start + hop.dex_type.pool_account_count();
+        let pool_end = pool_start + hop.dex_type.base_pool_account_count() + hop.extra_accounts as usize;
 
         if pool_end > accounts.len() {
             return Err(ProgramError::NotEnoughAccountKeys);
@@ -163,8 +163,10 @@ fn swap_raydium_cp(accounts: &[AccountView], amount_in: u64) -> ProgramResult {
     dex_pinocchio_cpi::raydium_cp::swap_base_input(&swap_accounts, &args, &[])
 }
 
-/// Raydium CLMM: swap with up to 3 tick arrays (10 base + 0-2 extra tick arrays).
-/// accounts[0..10] = base swap accounts, accounts[10..] = extra tick arrays.
+/// Raydium CLMM: swap with up to 3 unique tick arrays.
+/// accounts[0..10] = base swap accounts, accounts[10..N] = extra unique tick arrays.
+/// Executor must only pass unique tick arrays (no duplicates) to avoid AccountBorrowFailed.
+/// Total accounts: 10 (1 tick array), 11 (2 tick arrays), or 12 (3 tick arrays).
 fn swap_raydium_clmm(accounts: &[AccountView], amount_in: u64) -> ProgramResult {
     use pinocchio::instruction::{InstructionView, InstructionAccount};
     use pinocchio::cpi::invoke_signed_with_slice;
@@ -186,17 +188,8 @@ fn swap_raydium_clmm(accounts: &[AccountView], amount_in: u64) -> ProgramResult 
         );
     }
 
-    // Base 10 accounts + extra tick arrays (up to 2 more).
+    // All tick arrays are unique — executor guarantees no duplicates.
     let total = accounts.len().min(12);
-
-    // Detect duplicate tick arrays to avoid AccountBorrowFailed.
-    // accounts[9] is always the primary tick array (writable).
-    // accounts[10] and [11] are extra — only writable if distinct from prior ones.
-    let ta0 = accounts[9].address();
-    let ta1_distinct = total > 10 && accounts[10].address() != ta0;
-    let ta2_distinct = total > 11
-        && accounts[11].address() != ta0
-        && accounts[11].address() != accounts[10].address();
 
     let instruction_accounts: [InstructionAccount; 12] = [
         InstructionAccount::readonly_signer(accounts[0].address()),
@@ -208,17 +201,9 @@ fn swap_raydium_clmm(accounts: &[AccountView], amount_in: u64) -> ProgramResult 
         InstructionAccount::writable(accounts[6].address()),
         InstructionAccount::writable(accounts[7].address()),
         InstructionAccount::readonly(accounts[8].address()),
-        InstructionAccount::writable(ta0),
-        if ta1_distinct {
-            InstructionAccount::writable(accounts[10].address())
-        } else {
-            InstructionAccount::readonly(accounts[if total > 10 { 10 } else { 9 }].address())
-        },
-        if ta2_distinct {
-            InstructionAccount::writable(accounts[11].address())
-        } else {
-            InstructionAccount::readonly(accounts[if total > 11 { 11 } else { 9 }].address())
-        },
+        InstructionAccount::writable(accounts[9].address()),
+        InstructionAccount::writable(accounts[if total > 10 { 10 } else { 9 }].address()),
+        InstructionAccount::writable(accounts[if total > 11 { 11 } else { 9 }].address()),
     ];
 
     let instruction = InstructionView {

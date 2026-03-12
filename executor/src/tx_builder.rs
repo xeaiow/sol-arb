@@ -176,13 +176,6 @@ impl TxBuilder {
         }
         let cu_limit = anti_fp::jittered_cu(base_cu, self.cu_jitter_range);
 
-        // Check for cross-hop shared writable accounts within same CPI program.
-        // Same program CPI'd twice with same writable account → AccountBorrowFailed.
-        if self.has_cross_hop_borrow_conflict(opp) {
-            log::debug!("Skipping opportunity: cross-hop writable account conflict");
-            return TxPair { jito_tx: None, swqos_tx: None };
-        }
-
         let arb_ix = self.build_arb_instruction(opp);
 
         // If accounts are empty (missing required data), return empty TxPair
@@ -257,26 +250,38 @@ impl TxBuilder {
         let (jito_tx, swqos_tx) = rayon::join(
             || {
                 jito_ixs.as_ref().and_then(|ixs| {
-                    let msg = message::v0::Message::try_compile(
+                    match message::v0::Message::try_compile(
                         &payer_pubkey,
                         ixs,
                         &lookup_tables,
                         recent_blockhash,
-                    )
-                    .ok()?;
-                    VersionedTransaction::try_new(VersionedMessage::V0(msg), &[payer]).ok()
+                    ) {
+                        Ok(msg) => VersionedTransaction::try_new(VersionedMessage::V0(msg), &[payer])
+                            .map_err(|e| log::warn!("Jito tx sign failed: {}", e))
+                            .ok(),
+                        Err(e) => {
+                            log::warn!("Jito tx compile failed: {}", e);
+                            None
+                        }
+                    }
                 })
             },
             || {
                 swqos_ixs.as_ref().and_then(|ixs| {
-                    let msg = message::v0::Message::try_compile(
+                    match message::v0::Message::try_compile(
                         &payer_pubkey,
                         ixs,
                         &lookup_tables,
                         recent_blockhash,
-                    )
-                    .ok()?;
-                    VersionedTransaction::try_new(VersionedMessage::V0(msg), &[payer]).ok()
+                    ) {
+                        Ok(msg) => VersionedTransaction::try_new(VersionedMessage::V0(msg), &[payer])
+                            .map_err(|e| log::warn!("SwQoS tx sign failed: {}", e))
+                            .ok(),
+                        Err(e) => {
+                            log::warn!("SwQoS tx compile failed: {}", e);
+                            None
+                        }
+                    }
                 })
             },
         );
@@ -296,6 +301,34 @@ impl TxBuilder {
         }
     }
 
+    /// Calculate extra accounts for each hop (CLMM: unique tick arrays beyond the first).
+    fn hop_extra_accounts(snap: &PoolSnapshot) -> u8 {
+        if snap.dex_type != DexType::RaydiumClmm {
+            return 0;
+        }
+        // extra[2..] are tick arrays; count unique ones minus 1 (first is in base 10)
+        let extra = if snap.accounts.len() > 3 { &snap.accounts[3..] } else { return 0 };
+        let tick_arrays: Vec<&Pubkey> = if extra.len() > 2 {
+            extra[2..].iter().collect()
+        } else {
+            return 0;
+        };
+        if tick_arrays.is_empty() {
+            return 0;
+        }
+        let mut unique = vec![tick_arrays[0]];
+        for ta in tick_arrays.iter().skip(1) {
+            if !unique.contains(ta) {
+                unique.push(ta);
+            }
+            if unique.len() >= 3 {
+                break;
+            }
+        }
+        // extra_accounts = unique count - 1 (first tick array is in base 10 accounts)
+        (unique.len() - 1) as u8
+    }
+
     fn encode_instruction_data(&self, opp: &Opportunity, hop_count: u8) -> Vec<u8> {
         let mut data = Vec::with_capacity(20);
 
@@ -307,7 +340,13 @@ impl TxBuilder {
         data.push(opp.pool_snapshots[0].dex_type as u8);
         data.push(opp.pool_snapshots[hop_count as usize - 1].dex_type as u8);
 
-        // Flags byte: bit0=buy_a_to_b, bit1=sell_a_to_b, bit2=buy_2022, bit3=sell_2022
+        // Flags byte:
+        //   bit0 = buy_a_to_b
+        //   bit1 = sell_a_to_b
+        //   bit2 = buy_2022
+        //   bit3 = sell_2022
+        //   bit4-5 = buy extra_accounts (0-3, CLMM extra tick arrays)
+        //   bit6-7 = sell extra_accounts (0-3)
         let mut flags: u8 = 0;
         if opp.pool_snapshots[0].is_a_to_b {
             flags |= 1;
@@ -323,6 +362,9 @@ impl TxBuilder {
         if sell.mint_a_is_2022 || sell.mint_b_is_2022 {
             flags |= 1 << 3;
         }
+        // Encode extra_accounts for buy (bit4-5) and sell (bit6-7)
+        flags |= (Self::hop_extra_accounts(&opp.pool_snapshots[0]) & 3) << 4;
+        flags |= (Self::hop_extra_accounts(&opp.pool_snapshots[hop_count as usize - 1]) & 3) << 6;
         data.push(flags);
 
         // Middle hops (3-hop and 4-hop)
@@ -336,6 +378,8 @@ impl TxBuilder {
             if mid.mint_a_is_2022 || mid.mint_b_is_2022 {
                 mid_flags |= 1 << 1;
             }
+            // Encode extra_accounts for mid hop (bit2-3)
+            mid_flags |= (Self::hop_extra_accounts(&opp.pool_snapshots[i]) & 3) << 2;
             data.push(mid_flags);
         }
 
@@ -393,6 +437,28 @@ impl TxBuilder {
                 return vec![];
             }
             metas.extend(hop_metas);
+        }
+
+        // Append DEX program IDs needed for CPI (must be in transaction accounts).
+        // These are outside the per-hop slice but required for invoke_signed_with_slice.
+        // Use a set to avoid duplicates (e.g. two CLMM hops need only one program ID).
+        let mut dex_programs: Vec<Pubkey> = Vec::new();
+        for snapshot in &opp.pool_snapshots {
+            let prog = match snapshot.dex_type {
+                DexType::RaydiumAmmV4 => RAYDIUM_AMM_V4_PROGRAM,
+                DexType::RaydiumCpmm => RAYDIUM_CPMM_PROGRAM,
+                DexType::RaydiumClmm => RAYDIUM_CLMM_PROGRAM,
+                DexType::PumpFun => PUMPFUN_PROGRAM,
+                DexType::PumpSwap => PUMPSWAP_PROGRAM,
+                DexType::Bonk => BONKSWAP_PROGRAM,
+                DexType::MeteoraDammV2 => METEORA_DAMM_V2_PROGRAM,
+            };
+            if !dex_programs.contains(&prog) {
+                dex_programs.push(prog);
+            }
+        }
+        for prog in dex_programs {
+            metas.push(AccountMeta::new_readonly(prog, false));
         }
 
         metas
@@ -481,14 +547,15 @@ impl TxBuilder {
                 ]
             }
 
-            // Raydium CLMM: 13 accounts (10 base + 3 tick arrays)
+            // Raydium CLMM: 10 base + 0-2 unique extra tick arrays + program ID
             // extra[0]=amm_config, extra[1]=observation_key, extra[2..]=tick_arrays
-            // swap.rs: [payer, amm_config, pool_state, input_ata, output_ata,
-            //  input_vault, output_vault, observation, token_program, tick_array0, tick_array1, tick_array2]
+            // On-chain layout: [payer, amm_config, pool_state, input_ata, output_ata,
+            //  input_vault, output_vault, observation, token_program, tick_array0, ...]
+            // base_pool_account_count = 10, extra_accounts = unique extra tick arrays (0-2)
+            // CLMM program ID appended at end (needed for CPI but not counted in offset calc)
             DexType::RaydiumClmm => {
                 let amm_config = extra.first().copied().unwrap_or_default();
                 let observation = extra.get(1).copied().unwrap_or_default();
-                // Tick arrays start at extra[2]; pad to 3 by repeating the first
                 let tick_arrays: Vec<Pubkey> = if extra.len() > 2 {
                     extra[2..].to_vec()
                 } else {
@@ -498,11 +565,16 @@ impl TxBuilder {
                     log::warn!("CLMM tick_array missing for pool {}, skipping hop", pool);
                     return vec![];
                 }
-                // Pad to exactly 3 tick arrays by repeating the first.
-                // Duplicates must be readonly to avoid AccountBorrowFailed.
-                let ta0 = tick_arrays[0];
-                let ta1 = tick_arrays.get(1).copied().unwrap_or(ta0);
-                let ta2 = tick_arrays.get(2).copied().unwrap_or(ta0);
+                // Deduplicate tick arrays — only pass unique ones to avoid AccountBorrowFailed
+                let mut unique_tas = vec![tick_arrays[0]];
+                for ta in tick_arrays.iter().skip(1) {
+                    if !unique_tas.contains(ta) {
+                        unique_tas.push(*ta);
+                    }
+                    if unique_tas.len() >= 3 {
+                        break;
+                    }
+                }
                 let mut metas = vec![
                     AccountMeta::new(self.payer_pubkey, true),
                     AccountMeta::new_readonly(amm_config, false),
@@ -513,20 +585,11 @@ impl TxBuilder {
                     AccountMeta::new(output_vault, false),
                     AccountMeta::new(observation, false),
                     AccountMeta::new_readonly(SPL_TOKEN_PROGRAM_ID, false),
-                    AccountMeta::new(ta0, false),
+                    AccountMeta::new(unique_tas[0], false),
                 ];
-                // Only add ta1/ta2 as writable if they are distinct
-                if ta1 != ta0 {
-                    metas.push(AccountMeta::new(ta1, false));
-                } else {
-                    metas.push(AccountMeta::new_readonly(ta1, false));
+                for ta in unique_tas.iter().skip(1) {
+                    metas.push(AccountMeta::new(*ta, false));
                 }
-                if ta2 != ta0 && ta2 != ta1 {
-                    metas.push(AccountMeta::new(ta2, false));
-                } else {
-                    metas.push(AccountMeta::new_readonly(ta2, false));
-                }
-                metas.push(AccountMeta::new_readonly(RAYDIUM_CLMM_PROGRAM, false));
                 metas
             }
 
@@ -750,39 +813,6 @@ impl TxBuilder {
         Some(tip)
     }
 
-    /// Check if any two hops share writable accounts AND the same CPI program.
-    /// This would cause AccountBorrowFailed at runtime.
-    fn has_cross_hop_borrow_conflict(&self, opp: &Opportunity) -> bool {
-        let hop_count = opp.pool_snapshots.len();
-        if hop_count < 2 {
-            return false;
-        }
-
-        // Build per-hop writable account sets
-        let hop_accounts: Vec<Vec<AccountMeta>> = opp.pool_snapshots.iter()
-            .map(|snap| self.build_hop_accounts(snap))
-            .collect();
-
-        for i in 0..hop_count {
-            for j in (i + 1)..hop_count {
-                // Only conflict if same CPI program
-                if opp.pool_snapshots[i].dex_type != opp.pool_snapshots[j].dex_type {
-                    continue;
-                }
-                // Check writable account intersection
-                let writable_i: Vec<&Pubkey> = hop_accounts[i].iter()
-                    .filter(|m| m.is_writable)
-                    .map(|m| &m.pubkey)
-                    .collect();
-                let has_conflict = hop_accounts[j].iter()
-                    .any(|m| m.is_writable && writable_i.contains(&&m.pubkey));
-                if has_conflict {
-                    return true;
-                }
-            }
-        }
-        false
-    }
 
     /// Build create_associated_token_account_idempotent instructions
     /// for base mint and all intermediate mints. Idempotent = no-op if exists.
