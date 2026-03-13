@@ -29,6 +29,7 @@ const BONKSWAP_PROGRAM: Pubkey = solana_sdk::pubkey!("BSwp6bEBihVLdqJRKGgzjcGLHk
 
 // ── DEX Global PDAs / Constants ──
 const RAYDIUM_AMM_AUTHORITY: Pubkey = solana_sdk::pubkey!("5Q544fKrFoe6tsEbD7S8EmxGTJYAKtTVhAW5Q5pge4j1");
+const RAYDIUM_CPMM_AUTHORITY: Pubkey = solana_sdk::pubkey!("GpMZbSM2GgvTKHJirzeGfMFoaZ8UR2X7F4v8vHTvxFbL");
 const SYSVAR_RENT: Pubkey = solana_sdk::pubkey!("SysvarRent111111111111111111111111111111111");
 /// WSOL mint
 // ── PumpFun constants ──
@@ -541,10 +542,7 @@ impl TxBuilder {
             DexType::RaydiumCpmm => {
                 let amm_config = extra.first().copied().unwrap_or_default();
                 let observation = extra.get(1).copied().unwrap_or_default();
-                let (authority, _) = Pubkey::find_program_address(
-                    &[b"vault_and_lp_mint_auth_seed", pool.as_ref()],
-                    &RAYDIUM_CPMM_PROGRAM,
-                );
+                let authority = RAYDIUM_CPMM_AUTHORITY;
                 let input_token_prog = if snap.is_a_to_b && snap.mint_a_is_2022
                     || !snap.is_a_to_b && snap.mint_b_is_2022 {
                     TOKEN_2022_PROGRAM_ID

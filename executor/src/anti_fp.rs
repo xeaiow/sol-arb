@@ -51,6 +51,8 @@ pub fn estimate_cu(dex_types: &[u8]) -> u32 {
             4 => 35_000, // PumpSwap
             5 => 30_000, // Bonk
             6 => 45_000, // MeteoraDammV2
+            7 => 150_000, // MeteoraDlmm (bin-level swap2 is CU-heavy)
+            8 => 80_000, // OrcaWhirlpool
             _ => 50_000, // unknown fallback
         };
     }
