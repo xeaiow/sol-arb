@@ -65,6 +65,7 @@ program/           — Solana 鏈上程式（Anchor）
 - 每個 bin array 放 70 個 bin，`bin_array_index = floor(active_id / 70)`
 - Decoder 在解碼時就計算 3 個 bin array PDAs（current ± 1）塞進 `extra_accounts[1..4]`
 - `active_id` 變動時 LbPair account update 會重新算 bin array PDAs
+- **`replace_bin_arrays()` 必須同步更新 `extra_accounts`**——否則 tx_builder 用的 bin array PDAs 是舊的
 
 ### Orca Whirlpool
 - Concentrated liquidity（與 Raydium CLMM 共用 `PoolMath::Concentrated`）
@@ -72,6 +73,17 @@ program/           — Solana 鏈上程式（Anchor）
 - Tick array PDA 用 `start_index.to_string().as_bytes()`（vs Raydium 用 big-endian i32）
 - `SwapV2` 的 `sqrt_price_limit`：a_to_b 用 `MIN_SQRT_PRICE_X64 = 4295048016`，b_to_a 用 `MAX_SQRT_PRICE_X64`
 - Oracle PDA: `["oracle", whirlpool]`
+
+### PumpSwap Buy/Sell 帳戶佈局差異
+- Buy = 23 帳戶，Sell = 21 帳戶（Sell 沒有 `global_volume_accumulator` 和 `user_volume_accumulator`）
+- **off-chain 統一傳 23 帳戶（Buy 佈局）**，on-chain Sell 跳過 [19][20]，用 [21]=`fee_config`、[22]=`fee_program`
+- 如果 Sell 用 [19] 作 `fee_config` 會導致 0xbbf (AccountOwnedByWrongProgram)——因為 [19] 是 volume accumulator PDA
+- `fee_config` PDA seeds: `["fee_config", PUMPSWAP_PROGRAM]` → `PUMPSWAP_FEE_PROGRAM`
+- `base_pool_account_count` = 23（固定，不分 buy/sell）
+
+### Raydium CPMM Authority
+- 全域常數 `GpMZbSM2GgvTKHJirzeGfMFoaZ8UR2X7F4v8vHTvxFbL`，**不是** per-pool PDA
+- 用 `find_program_address` 派生會得到錯誤地址，導致 0x7d6 (ConstraintSeeds)
 
 ### CLMM Tick Array
 - 輸入金額超過已載入 tick array 範圍會報 `NotEnoughTickArrayAccount (6027)`

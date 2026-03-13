@@ -681,7 +681,7 @@ impl TxBuilder {
             //  event_authority, program, coin_creator_vault_ata, coin_creator_vault_authority,
             //  global_volume_accumulator, user_volume_accumulator, fee_config, fee_program]
             DexType::PumpSwap => {
-                let _coin_creator = extra.first().copied().unwrap_or_default();
+                let coin_creator = extra.first().copied().unwrap_or_default();
                 let base_mint = snap.mint_a;
                 let quote_mint = snap.mint_b;
                 let base_token_prog = if snap.mint_a_is_2022 { TOKEN_2022_PROGRAM_ID } else { SPL_TOKEN_PROGRAM_ID };
@@ -696,9 +696,9 @@ impl TxBuilder {
                     &[b"__event_authority"],
                     &PUMPSWAP_PROGRAM,
                 );
-                // coin_creator_vault_authority PDA: ["coin_creator_vault_authority", pool]
+                // coin_creator_vault_authority PDA: ["creator_vault", coin_creator]
                 let (coin_creator_vault_authority, _) = Pubkey::find_program_address(
-                    &[b"coin_creator_vault_authority", pool.as_ref()],
+                    &[b"creator_vault", coin_creator.as_ref()],
                     &PUMPSWAP_PROGRAM,
                 );
                 // coin_creator_vault_ata = ATA(coin_creator_vault_authority, quote_mint)

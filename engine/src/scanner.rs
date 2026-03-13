@@ -396,6 +396,18 @@ impl Scanner {
         let mut pool_snapshots = Vec::with_capacity(route.hops.len());
         let mut max_slot = slot;
 
+        // Diagnostic: log reserves for suspicious high-profit opportunities
+        if profit > 1_000_000_000 {
+            for hop in &route.hops {
+                let pool = &self.graph.pools[hop.pool_index as usize];
+                log::warn!(
+                    "[HI_PROFIT] pool={} dex={:?} a_to_b={} math={:?} slot={}",
+                    &pool.address.to_string()[..8], pool.dex_type, hop.is_a_to_b,
+                    pool.math, pool.last_updated_slot,
+                );
+            }
+        }
+
         for hop in &route.hops {
             let pool = &self.graph.pools[hop.pool_index as usize];
             if pool.last_updated_slot > max_slot {
