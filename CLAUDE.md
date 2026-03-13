@@ -41,6 +41,23 @@ program/           — Solana 鏈上程式（Anchor）
 ### Meteora DAMM V2
 - `pool_authority` 是固定全域地址 `HLnpSz9h2S4hiLQ43rnSD9XkcUThA7B8hQMKmDaiTLcC`（來自 IDL），不是 per-pool PDA
 
+### Meteora DLMM
+- Bin-based AMM，離線用 ConstantProduct + vault balance 近似報價
+- `Swap2` 指令需要 bin_arrays 作為 remaining accounts
+- `bin_array_bitmap_extension` PDA: `["bitmap", lb_pair]`
+- Fee: `base_factor * bin_step * 10` (units of 1e-9)
+- Bin array PDA seeds: `["bin_array", lb_pair, index.to_le_bytes()]`（index 是 i64）
+- 每個 bin array 放 70 個 bin，`bin_array_index = floor(active_id / 70)`
+- Decoder 在解碼時就計算 3 個 bin array PDAs（current ± 1）塞進 `extra_accounts[1..4]`
+- `active_id` 變動時 LbPair account update 會重新算 bin array PDAs
+
+### Orca Whirlpool
+- Concentrated liquidity（與 Raydium CLMM 共用 `PoolMath::Concentrated`）
+- Tick array 有 88 個 tick（vs Raydium 60），tick size = 113 bytes
+- Tick array PDA 用 `start_index.to_string().as_bytes()`（vs Raydium 用 big-endian i32）
+- `SwapV2` 的 `sqrt_price_limit`：a_to_b 用 `MIN_SQRT_PRICE_X64 = 4295048016`，b_to_a 用 `MAX_SQRT_PRICE_X64`
+- Oracle PDA: `["oracle", whirlpool]`
+
 ### CLMM Tick Array
 - 輸入金額超過已載入 tick array 範圍會報 `NotEnoughTickArrayAccount (6027)`
 - `clmm_cap_input()` 用 `limit_in_a` / `limit_in_b` 限制第一跳 CLMM 輸入量
@@ -120,7 +137,7 @@ RPC endpoint: 用 config.toml 中的 `rpc_url`，或 fallback 到 `https://mainn
 - Engine 有 optimizer 單元測試
 - 修改後應確認 `cargo build` 和 `cargo test` 通過
 
-## 目前支援的 DEX（7 個）
+## 目前支援的 DEX（9 個）
 1. Raydium AMM V4 — ConstantProduct
 2. Raydium CPMM — ConstantProduct
 3. Raydium CLMM — Concentrated（有 tick boundary 限制）
@@ -128,10 +145,10 @@ RPC endpoint: 用 config.toml 中的 `rpc_url`，或 fallback 到 `https://mainn
 5. PumpSwap — ConstantProduct
 6. BonkSwap — ConstantProduct
 7. Meteora DAMM V2 — ConstantProduct
+8. Meteora DLMM — ConstantProduct（bin-based，用 vault balance 近似報價）
+9. Orca Whirlpool — Concentrated（tick-based CLMM，與 Raydium CLMM 共用數學模型）
 
 ## Backlog 重點
-- Meteora DLMM（bin-based，高優先）
-- Orca Whirlpool（tick-based CLMM，高優先）
 - Raydium CLMM tick_arrays 完整支援
 - 啟動時 getProgramAccounts 批量拉池子
 - 詳見 memory/backlog.md

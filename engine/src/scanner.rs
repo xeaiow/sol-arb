@@ -8,6 +8,7 @@ use tokio::sync::mpsc;
 
 use solana_streamer_sdk::pool::state::{DexType, PoolMath, PoolUpdate};
 use solana_streamer_sdk::pool::decoder::raydium_clmm;
+use solana_streamer_sdk::pool::decoder::orca_whirlpool;
 
 use crate::config::{EngineConfig, WSOL_MINT};
 use crate::graph::{PoolEntry, TokenGraph};
@@ -453,17 +454,24 @@ impl Scanner {
         }
         accounts.extend_from_slice(&pool.extra_accounts);
 
-        // CLMM: pass tick array PDAs. Raydium CLMM requires the FIRST tick array
-        // to contain tick_current. If no loaded tick array covers current tick,
+        // CLMM/Whirlpool: pass tick array PDAs. The FIRST tick array must contain
+        // tick_current. If no loaded tick array covers current tick,
         // return empty to signal pool isn't ready (needs tick array reload).
-        if pool.dex_type == DexType::RaydiumClmm {
+        if pool.dex_type == DexType::RaydiumClmm || pool.dex_type == DexType::OrcaWhirlpool {
             if let PoolMath::Concentrated { tick_current, tick_spacing, tick_arrays, .. } = &pool.math {
                 if tick_arrays.is_empty() {
                     return vec![];
                 }
+                // Raydium CLMM: 60 ticks per array; Orca Whirlpool: 88 ticks per array
+                let ticks_per_array_count = if pool.dex_type == DexType::OrcaWhirlpool { 88 } else { 60 };
                 let ts = *tick_spacing as i32;
-                let ticks_per_array = ts * 60; // 60 ticks per array (Raydium convention)
-                let current_start = raydium_clmm::tick_array_start_index(*tick_current, *tick_spacing);
+                let ticks_per_array = ts * ticks_per_array_count;
+
+                let current_start = if pool.dex_type == DexType::OrcaWhirlpool {
+                    orca_whirlpool::tick_array_start_index(*tick_current, *tick_spacing)
+                } else {
+                    raydium_clmm::tick_array_start_index(*tick_current, *tick_spacing)
+                };
 
                 // Find the tick array that contains tick_current (must be first)
                 let containing = tick_arrays.iter().find(|ta| {
@@ -476,8 +484,13 @@ impl Scanner {
                     return vec![];
                 };
 
-                // First: the containing tick array
-                if let Some(pda) = raydium_clmm::tick_array_pda(&pool.address, first_ta.start_tick_index) {
+                // Derive PDA for the containing tick array
+                let first_pda = if pool.dex_type == DexType::OrcaWhirlpool {
+                    orca_whirlpool::tick_array_pda(&pool.address, first_ta.start_tick_index)
+                } else {
+                    raydium_clmm::tick_array_pda(&pool.address, first_ta.start_tick_index)
+                };
+                if let Some(pda) = first_pda {
                     accounts.push(pda);
                 }
 
@@ -488,7 +501,12 @@ impl Scanner {
                 others.sort_by_key(|ta| (ta.start_tick_index - current_start).unsigned_abs());
 
                 for ta in others.iter().take(2) {
-                    if let Some(pda) = raydium_clmm::tick_array_pda(&pool.address, ta.start_tick_index) {
+                    let pda = if pool.dex_type == DexType::OrcaWhirlpool {
+                        orca_whirlpool::tick_array_pda(&pool.address, ta.start_tick_index)
+                    } else {
+                        raydium_clmm::tick_array_pda(&pool.address, ta.start_tick_index)
+                    };
+                    if let Some(pda) = pda {
                         accounts.push(pda);
                     }
                 }

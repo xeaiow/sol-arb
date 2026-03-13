@@ -125,11 +125,11 @@ fn parse_2hop_token_2022_flags() {
 
 #[test]
 fn dex_type_roundtrip() {
-    for i in 0..=6u8 {
+    for i in 0..=8u8 {
         let dex = DexType::from_u8(i).unwrap();
         assert!(dex.base_pool_account_count() > 0);
     }
-    assert!(DexType::from_u8(7).is_err());
+    assert!(DexType::from_u8(9).is_err());
     assert!(DexType::from_u8(255).is_err());
 }
 
@@ -142,6 +142,8 @@ fn pool_account_counts() {
     assert_eq!(DexType::PumpSwap.base_pool_account_count(), 23);
     assert_eq!(DexType::Bonk.base_pool_account_count(), 17);
     assert_eq!(DexType::MeteoraDammV2.base_pool_account_count(), 14);
+    assert_eq!(DexType::MeteoraDlmm.base_pool_account_count(), 16);
+    assert_eq!(DexType::OrcaWhirlpool.base_pool_account_count(), 15);
 }
 
 // ── pool_accounts_start tests ──

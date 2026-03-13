@@ -151,6 +151,22 @@ pub fn discover_pool(event: &DexEvent) -> Option<DiscoveredPool> {
             mint_b: Some(e.token_b_mint),
         }),
 
+        // ── Meteora DLMM ───────────────────────────────────────────
+        DexEvent::MeteoraDlmmSwap2Event(e) => Some(DiscoveredPool {
+            address: e.lb_pair,
+            dex_type: DexType::MeteoraDlmm,
+            mint_a: Some(e.token_x_mint),
+            mint_b: Some(e.token_y_mint),
+        }),
+
+        // ── Orca Whirlpool ───────────────────────────────────────
+        DexEvent::OrcaWhirlpoolSwapV2Event(e) => Some(DiscoveredPool {
+            address: e.whirlpool,
+            dex_type: DexType::OrcaWhirlpool,
+            mint_a: Some(e.token_mint_a),
+            mint_b: Some(e.token_mint_b),
+        }),
+
         // Non-pool events (config, position, account, etc.)
         _ => None,
     }

@@ -11,6 +11,8 @@ pub enum DexType {
     PumpSwap = 4,
     Bonk = 5,
     MeteoraDammV2 = 6,
+    MeteoraDlmm = 7,
+    OrcaWhirlpool = 8,
 }
 
 impl DexType {
@@ -23,6 +25,8 @@ impl DexType {
             4 => Ok(Self::PumpSwap),
             5 => Ok(Self::Bonk),
             6 => Ok(Self::MeteoraDammV2),
+            7 => Ok(Self::MeteoraDlmm),
+            8 => Ok(Self::OrcaWhirlpool),
             _ => Err(ProgramError::InvalidInstructionData),
         }
     }
@@ -37,6 +41,8 @@ impl DexType {
             DexType::PumpSwap => 23,
             DexType::Bonk => 17,
             DexType::MeteoraDammV2 => 14,
+            DexType::MeteoraDlmm => 16, // 16 fixed + remaining bin_arrays via extra_accounts
+            DexType::OrcaWhirlpool => 15, // base only; like CLMM, no extra tick arrays in base
         }
     }
 }

@@ -25,6 +25,8 @@ pub enum DexType {
     PumpSwap = 4,
     Bonk = 5,
     MeteoraDammV2 = 6,
+    MeteoraDlmm = 7,
+    OrcaWhirlpool = 8,
 }
 
 /// Pool pricing math — off-chain only, f64 fast-path

@@ -142,9 +142,15 @@ impl PoolStreamer {
             }
         }
 
-        // 4. Handle CLMM tick array updates
+        // 4. Handle CLMM tick array updates (Raydium CLMM)
         if let DexEvent::RaydiumClmmTickArrayStateAccountEvent(ref ta_event) = event {
             let ta = decoder::raydium_clmm::tick_array_from_state(&ta_event.tick_array_state);
+            self.cache.update_tick_array(&ta_event.pubkey, ta, ta_event.metadata.slot);
+        }
+
+        // 4b. Handle Orca Whirlpool tick array updates
+        if let DexEvent::OrcaWhirlpoolTickArrayAccountEvent(ref ta_event) = event {
+            let ta = decoder::orca_whirlpool::tick_array_from_event(ta_event);
             self.cache.update_tick_array(&ta_event.pubkey, ta, ta_event.metadata.slot);
         }
 
@@ -247,6 +253,12 @@ impl PoolStreamer {
         if pool_state.dex_type == DexType::RaydiumClmm {
             let addr = pool_state.address;
             self.fetch_clmm_extras(&addr, &mut pool_state).await;
+        }
+
+        // For Orca Whirlpool pools: fetch tick arrays (fee_rate already in pool state)
+        if pool_state.dex_type == DexType::OrcaWhirlpool {
+            let addr = pool_state.address;
+            self.fetch_whirlpool_tick_arrays(&addr, &mut pool_state).await;
         }
 
         // For CPMM pools: fetch AmmConfig trade_fee_rate (extra_accounts[0] = amm_config)
@@ -354,6 +366,51 @@ impl PoolStreamer {
         );
     }
 
+    /// Fetch tick arrays for an Orca Whirlpool pool.
+    /// fee_rate is already embedded in the pool state from the decoder.
+    async fn fetch_whirlpool_tick_arrays(&self, pool_address: &Pubkey, pool_state: &mut PoolState) {
+        let PoolMath::Concentrated {
+            ref mut tick_arrays,
+            tick_current,
+            tick_spacing,
+            ..
+        } = pool_state.math
+        else {
+            return;
+        };
+
+        let start_indices =
+            decoder::orca_whirlpool::tick_array_start_indices(tick_current, tick_spacing);
+        let mut pending = self.pending_subscriptions.lock().await;
+
+        let mut loaded = 0u32;
+        let mut failed = 0u32;
+        for start_index in start_indices {
+            if let Some(pda) = decoder::orca_whirlpool::tick_array_pda(pool_address, start_index) {
+                match self.rpc.get_account_data(&pda).await {
+                    Ok(ta_data) => {
+                        if let Some(ta) = decoder::orca_whirlpool::decode_tick_array(&ta_data) {
+                            tick_arrays.push(ta);
+                            self.cache.register_tick_array(pda, *pool_address);
+                            pending.push(pda.to_string());
+                            loaded += 1;
+                        }
+                    }
+                    Err(e) => {
+                        if failed == 0 {
+                            info!("Whirlpool tick_array fetch err for {}: {}", pda, e);
+                        }
+                        failed += 1;
+                    }
+                }
+            }
+        }
+        info!(
+            "Whirlpool {} tick_arrays: {} loaded, {} failed (tick={}, spacing={})",
+            pool_address, loaded, failed, tick_current, tick_spacing
+        );
+    }
+
     /// Apply PumpSwap fee rates from cached GlobalConfig.
     /// Fetches GlobalConfig once on first PumpSwap pool registration.
     async fn apply_pumpswap_fee(&self, pool_state: &mut PoolState) {
@@ -442,34 +499,59 @@ impl PoolStreamer {
         }
 
         for req in requests {
-            let start_indices =
-                decoder::raydium_clmm::tick_array_start_indices(req.tick_current, req.tick_spacing);
-            let mut new_tick_arrays = Vec::with_capacity(3);
+            // Determine if this is a Raydium CLMM or Orca Whirlpool pool
+            let is_whirlpool = self.cache.get(&req.pool_address)
+                .map(|p| p.dex_type == DexType::OrcaWhirlpool)
+                .unwrap_or(false);
+
+            let mut new_tick_arrays = Vec::with_capacity(7);
             let mut pending = self.pending_subscriptions.lock().await;
 
-            for start_index in start_indices {
-                if let Some(pda) = decoder::raydium_clmm::tick_array_pda(&req.pool_address, start_index) {
-                    // Register mapping regardless of fetch success (for future gRPC updates)
-                    self.cache.register_tick_array(pda, req.pool_address);
-                    pending.push(pda.to_string());
-
-                    match self.rpc.get_account_data(&pda).await {
-                        Ok(ta_data) => {
-                            if let Some(ta) = decoder::raydium_clmm::decode_tick_array(&ta_data) {
-                                new_tick_arrays.push(ta);
+            if is_whirlpool {
+                let start_indices =
+                    decoder::orca_whirlpool::tick_array_start_indices(req.tick_current, req.tick_spacing);
+                for start_index in start_indices {
+                    if let Some(pda) = decoder::orca_whirlpool::tick_array_pda(&req.pool_address, start_index) {
+                        self.cache.register_tick_array(pda, req.pool_address);
+                        pending.push(pda.to_string());
+                        match self.rpc.get_account_data(&pda).await {
+                            Ok(ta_data) => {
+                                if let Some(ta) = decoder::orca_whirlpool::decode_tick_array(&ta_data) {
+                                    new_tick_arrays.push(ta);
+                                }
+                            }
+                            Err(e) => {
+                                debug!("Whirlpool tick array reload fetch err for {}: {}", pda, e);
                             }
                         }
-                        Err(e) => {
-                            debug!("Tick array reload fetch err for {}: {}", pda, e);
+                    }
+                }
+            } else {
+                let start_indices =
+                    decoder::raydium_clmm::tick_array_start_indices(req.tick_current, req.tick_spacing);
+                for start_index in start_indices {
+                    if let Some(pda) = decoder::raydium_clmm::tick_array_pda(&req.pool_address, start_index) {
+                        self.cache.register_tick_array(pda, req.pool_address);
+                        pending.push(pda.to_string());
+                        match self.rpc.get_account_data(&pda).await {
+                            Ok(ta_data) => {
+                                if let Some(ta) = decoder::raydium_clmm::decode_tick_array(&ta_data) {
+                                    new_tick_arrays.push(ta);
+                                }
+                            }
+                            Err(e) => {
+                                debug!("Tick array reload fetch err for {}: {}", pda, e);
+                            }
                         }
                     }
                 }
             }
 
             if !new_tick_arrays.is_empty() {
+                let dex_name = if is_whirlpool { "Whirlpool" } else { "CLMM" };
                 info!(
-                    "CLMM {} tick array reload: {} loaded (tick={})",
-                    req.pool_address, new_tick_arrays.len(), req.tick_current
+                    "{} {} tick array reload: {} loaded (tick={})",
+                    dex_name, req.pool_address, new_tick_arrays.len(), req.tick_current
                 );
                 // Use the pool's existing slot (not 0) to avoid dedup issues in scanner
                 let reload_slot = self.cache.get(&req.pool_address)

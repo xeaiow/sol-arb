@@ -51,6 +51,8 @@ pub enum ProtocolType {
     RaydiumClmm,
     RaydiumAmmV4,
     MeteoraDammV2,
+    MeteoraDlmm,
+    OrcaWhirlpool,
     Common,
 }
 
@@ -117,6 +119,12 @@ pub enum EventType {
     MeteoraDammV2InitializeCustomizablePool,
     MeteoraDammV2InitializePoolWithDynamicConfig,
 
+    // Meteora DLMM events
+    MeteoraDlmmSwap2,
+
+    // Orca Whirlpool events
+    OrcaWhirlpoolSwapV2,
+
     // Account events
     AccountRaydiumAmmV4AmmInfo,
     AccountPumpSwapGlobalConfig,
@@ -133,6 +141,9 @@ pub enum EventType {
     AccountRaydiumCpmmAmmConfig,
     AccountRaydiumCpmmPoolState,
     AccountMeteoraDammV2Pool,
+    AccountMeteoraDlmmLbPair,
+    AccountOrcaWhirlpool,
+    AccountOrcaWhirlpoolTickArray,
 
     NonceAccount,
     TokenAccount,
@@ -160,6 +171,9 @@ pub const ACCOUNT_EVENT_TYPES: &[EventType] = &[
     EventType::AccountRaydiumCpmmAmmConfig,
     EventType::AccountRaydiumCpmmPoolState,
     EventType::AccountMeteoraDammV2Pool,
+    EventType::AccountMeteoraDlmmLbPair,
+    EventType::AccountOrcaWhirlpool,
+    EventType::AccountOrcaWhirlpoolTickArray,
     EventType::TokenAccount,
     EventType::NonceAccount,
 ];
@@ -233,7 +247,12 @@ impl fmt::Display for EventType {
             }
             EventType::AccountRaydiumCpmmAmmConfig => write!(f, "AccountRaydiumCpmmAmmConfig"),
             EventType::AccountRaydiumCpmmPoolState => write!(f, "AccountRaydiumCpmmPoolState"),
+            EventType::MeteoraDlmmSwap2 => write!(f, "MeteoraDlmmSwap2"),
+            EventType::OrcaWhirlpoolSwapV2 => write!(f, "OrcaWhirlpoolSwapV2"),
             EventType::AccountMeteoraDammV2Pool => write!(f, "AccountMeteoraDammV2Pool"),
+            EventType::AccountMeteoraDlmmLbPair => write!(f, "AccountMeteoraDlmmLbPair"),
+            EventType::AccountOrcaWhirlpool => write!(f, "AccountOrcaWhirlpool"),
+            EventType::AccountOrcaWhirlpoolTickArray => write!(f, "AccountOrcaWhirlpoolTickArray"),
             EventType::TokenAccount => write!(f, "TokenAccount"),
             EventType::NonceAccount => write!(f, "NonceAccount"),
             EventType::BlockMeta => write!(f, "BlockMeta"),

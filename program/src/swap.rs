@@ -101,6 +101,9 @@ fn dispatch_swap(hop: &HopInfo, pool_accounts: &[AccountView], amount_in: u64) -
                 // buy: input=quote [6], sell: input=base [5]
             DexType::Bonk => 6,          // swapper_x_account
             DexType::MeteoraDammV2 => 2, // input_token_account
+        DexType::MeteoraDlmm => 4, // user_token_in
+        DexType::OrcaWhirlpool => if hop.is_a_to_b { 7 } else { 9 },
+            // a_to_b: input=token_owner_account_a [7], b_to_a: input=token_owner_account_b [9]
         };
         read_token_balance(&pool_accounts[input_ata_index])?
     } else {
@@ -115,6 +118,8 @@ fn dispatch_swap(hop: &HopInfo, pool_accounts: &[AccountView], amount_in: u64) -
         DexType::PumpSwap => swap_pumpswap(pool_accounts, hop.is_a_to_b, amount),
         DexType::Bonk => swap_bonkswap(pool_accounts, amount),
         DexType::MeteoraDammV2 => swap_meteora_damm_v2(pool_accounts, amount),
+        DexType::MeteoraDlmm => swap_meteora_dlmm(pool_accounts, amount),
+        DexType::OrcaWhirlpool => swap_orca_whirlpool(pool_accounts, amount, hop.is_a_to_b),
     }
 }
 
@@ -372,6 +377,91 @@ fn swap_bonkswap(accounts: &[AccountView], amount_in: u64) -> ProgramResult {
     dex_pinocchio_cpi::bonkswap::swap(&swap_accounts, &args, &[])
 }
 
+/// Meteora DLMM: swap2 (16 fixed accounts + remaining bin_arrays).
+/// Layout: [lb_pair, bin_array_bitmap_extension, reserve_x, reserve_y,
+///  user_token_in, user_token_out, token_x_mint, token_y_mint, oracle,
+///  host_fee_in, user, token_x_program, token_y_program, memo_program,
+///  event_authority, program, ...bin_arrays]
+fn swap_meteora_dlmm(accounts: &[AccountView], amount_in: u64) -> ProgramResult {
+    use pinocchio::instruction::{InstructionView, InstructionAccount};
+    use pinocchio::cpi::invoke_signed_with_slice;
+
+    // Build instruction data: 8-byte discriminator + Swap2Args
+    // Swap2Args: amount_in(u64) + min_amount_out(u64) + remaining_accounts_info([u8;32])
+    let mut data = [0u8; 8 + 8 + 8 + 32];
+    data[0..8].copy_from_slice(&dex_pinocchio_cpi::meteora_dlmm::SWAP2);
+    data[8..16].copy_from_slice(&amount_in.to_le_bytes());
+    // min_amount_out = 0 (profit verified atomically)
+    // data[16..24] already zeroed
+
+    // remaining_accounts_info: describes remaining accounts as transfer hook accounts
+    // For bin arrays, each remaining account is type 0 (AccountsType::TransferHookA = 0)
+    // Format: first byte = number of slices, then per slice: type(u8) + length(u8)
+    let bin_array_count = accounts.len().saturating_sub(16);
+    if bin_array_count > 0 {
+        // 1 slice, type=0 (TransferHookA), length=bin_array_count
+        data[24] = 1; // num_slices
+        data[25] = 0; // slice type (TransferHookA)
+        data[26] = bin_array_count as u8; // slice length
+    }
+    // else: remaining_accounts_info = all zeros = no remaining accounts
+
+    let total = accounts.len().min(24); // 16 fixed + up to 8 bin arrays
+
+    // Build instruction accounts using a fixed array initialized inline
+    let instruction_accounts: [InstructionAccount; 24] = [
+        InstructionAccount::writable(accounts[0].address()),           // [0] lb_pair
+        InstructionAccount::readonly(accounts[1].address()),            // [1] bin_array_bitmap_extension
+        InstructionAccount::writable(accounts[2].address()),           // [2] reserve_x
+        InstructionAccount::writable(accounts[3].address()),           // [3] reserve_y
+        InstructionAccount::writable(accounts[if total > 4 { 4 } else { 0 }].address()),  // [4] user_token_in
+        InstructionAccount::writable(accounts[if total > 5 { 5 } else { 0 }].address()),  // [5] user_token_out
+        InstructionAccount::readonly(accounts[if total > 6 { 6 } else { 0 }].address()),  // [6] token_x_mint
+        InstructionAccount::readonly(accounts[if total > 7 { 7 } else { 0 }].address()),  // [7] token_y_mint
+        InstructionAccount::writable(accounts[if total > 8 { 8 } else { 0 }].address()),  // [8] oracle
+        InstructionAccount::writable(accounts[if total > 9 { 9 } else { 0 }].address()),  // [9] host_fee_in
+        InstructionAccount::readonly_signer(accounts[if total > 10 { 10 } else { 0 }].address()), // [10] user
+        InstructionAccount::readonly(accounts[if total > 11 { 11 } else { 0 }].address()), // [11] token_x_program
+        InstructionAccount::readonly(accounts[if total > 12 { 12 } else { 0 }].address()), // [12] token_y_program
+        InstructionAccount::readonly(accounts[if total > 13 { 13 } else { 0 }].address()), // [13] memo_program
+        InstructionAccount::readonly(accounts[if total > 14 { 14 } else { 0 }].address()), // [14] event_authority
+        InstructionAccount::readonly(accounts[if total > 15 { 15 } else { 0 }].address()), // [15] program
+        // Remaining bin arrays (writable)
+        InstructionAccount::writable(accounts[if total > 16 { 16 } else { 0 }].address()),
+        InstructionAccount::writable(accounts[if total > 17 { 17 } else { 0 }].address()),
+        InstructionAccount::writable(accounts[if total > 18 { 18 } else { 0 }].address()),
+        InstructionAccount::writable(accounts[if total > 19 { 19 } else { 0 }].address()),
+        InstructionAccount::writable(accounts[if total > 20 { 20 } else { 0 }].address()),
+        InstructionAccount::writable(accounts[if total > 21 { 21 } else { 0 }].address()),
+        InstructionAccount::writable(accounts[if total > 22 { 22 } else { 0 }].address()),
+        InstructionAccount::writable(accounts[if total > 23 { 23 } else { 0 }].address()),
+    ];
+
+    let instruction = InstructionView {
+        program_id: &dex_pinocchio_cpi::meteora_dlmm::ID,
+        accounts: &instruction_accounts[..total],
+        data: &data,
+    };
+
+    // Build account views slice
+    let views: [&AccountView; 24] = [
+        &accounts[0], &accounts[if total > 1 { 1 } else { 0 }],
+        &accounts[if total > 2 { 2 } else { 0 }], &accounts[if total > 3 { 3 } else { 0 }],
+        &accounts[if total > 4 { 4 } else { 0 }], &accounts[if total > 5 { 5 } else { 0 }],
+        &accounts[if total > 6 { 6 } else { 0 }], &accounts[if total > 7 { 7 } else { 0 }],
+        &accounts[if total > 8 { 8 } else { 0 }], &accounts[if total > 9 { 9 } else { 0 }],
+        &accounts[if total > 10 { 10 } else { 0 }], &accounts[if total > 11 { 11 } else { 0 }],
+        &accounts[if total > 12 { 12 } else { 0 }], &accounts[if total > 13 { 13 } else { 0 }],
+        &accounts[if total > 14 { 14 } else { 0 }], &accounts[if total > 15 { 15 } else { 0 }],
+        &accounts[if total > 16 { 16 } else { 0 }], &accounts[if total > 17 { 17 } else { 0 }],
+        &accounts[if total > 18 { 18 } else { 0 }], &accounts[if total > 19 { 19 } else { 0 }],
+        &accounts[if total > 20 { 20 } else { 0 }], &accounts[if total > 21 { 21 } else { 0 }],
+        &accounts[if total > 22 { 22 } else { 0 }], &accounts[if total > 23 { 23 } else { 0 }],
+    ];
+
+    invoke_signed_with_slice(&instruction, &views[..total], &[])
+}
+
 /// Meteora DAMM V2: swap (14 accounts).
 fn swap_meteora_damm_v2(accounts: &[AccountView], amount_in: u64) -> ProgramResult {
     let swap_accounts = dex_pinocchio_cpi::meteora_damm_v2::SwapAccounts {
@@ -396,4 +486,45 @@ fn swap_meteora_damm_v2(accounts: &[AccountView], amount_in: u64) -> ProgramResu
     params[..8].copy_from_slice(&amount_in.to_le_bytes());
     let args = dex_pinocchio_cpi::meteora_damm_v2::SwapArgs { params };
     dex_pinocchio_cpi::meteora_damm_v2::swap(&swap_accounts, &args, &[])
+}
+
+/// Orca Whirlpool: swap_v2 (15 accounts).
+/// Layout: [token_program_a, token_program_b, memo_program, token_authority,
+///  whirlpool, token_mint_a, token_mint_b, token_owner_account_a, token_vault_a,
+///  token_owner_account_b, token_vault_b, tick_array_0, tick_array_1, tick_array_2, oracle]
+fn swap_orca_whirlpool(accounts: &[AccountView], amount_in: u64, a_to_b: bool) -> ProgramResult {
+    let swap_accounts = dex_pinocchio_cpi::whirlpool::Swapv2Accounts {
+        token_program_a: &accounts[0],
+        token_program_b: &accounts[1],
+        memo_program: &accounts[2],
+        token_authority: &accounts[3],
+        whirlpool: &accounts[4],
+        token_mint_a: &accounts[5],
+        token_mint_b: &accounts[6],
+        token_owner_account_a: &accounts[7],
+        token_vault_a: &accounts[8],
+        token_owner_account_b: &accounts[9],
+        token_vault_b: &accounts[10],
+        tick_array0: &accounts[11],
+        tick_array1: &accounts[12],
+        tick_array2: &accounts[13],
+        oracle: &accounts[14],
+    };
+    // sqrt_price_limit: 0 means no limit (use MIN_SQRT_PRICE or MAX_SQRT_PRICE)
+    // For a_to_b: price goes down, use MIN_SQRT_PRICE_X64 = 4295048016
+    // For b_to_a: price goes up, use MAX_SQRT_PRICE_X64 = 79226673515401279992447579055
+    let sqrt_price_limit: u128 = if a_to_b {
+        4295048016 // MIN_SQRT_PRICE_X64
+    } else {
+        79226673515401279992447579055 // MAX_SQRT_PRICE_X64
+    };
+    let args = dex_pinocchio_cpi::whirlpool::Swapv2Args {
+        amount: amount_in,
+        other_amount_threshold: 0,
+        sqrt_price_limit,
+        amount_specified_is_input: true,
+        a_to_b,
+        remaining_accounts_info: None,
+    };
+    dex_pinocchio_cpi::whirlpool::swap_v2(&swap_accounts, &args, &[])
 }

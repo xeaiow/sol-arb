@@ -1,6 +1,8 @@
 pub mod block;
 pub mod bonk;
 pub mod meteora_damm_v2;
+pub mod meteora_dlmm;
+pub mod orca_whirlpool;
 pub mod pumpfun;
 pub mod pumpswap;
 pub mod raydium_amm_v4;

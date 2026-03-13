@@ -1,5 +1,7 @@
 pub mod bonk;
 pub mod meteora_damm_v2;
+pub mod meteora_dlmm;
+pub mod orca_whirlpool;
 pub mod pumpfun;
 pub mod pumpswap;
 pub mod raydium_amm_v4;
@@ -22,6 +24,8 @@ pub fn pool_state_from_event(event: &DexEvent) -> Option<PoolState> {
         DexEvent::PumpSwapPoolAccountEvent(e) => pumpswap::decode(e),
         DexEvent::BonkPoolStateAccountEvent(e) => bonk::decode(e),
         DexEvent::MeteoraDammV2PoolStateAccountEvent(e) => meteora_damm_v2::decode(e),
+        DexEvent::MeteoraDlmmLbPairAccountEvent(e) => meteora_dlmm::decode(e),
+        DexEvent::OrcaWhirlpoolAccountEvent(e) => orca_whirlpool::decode(e),
         _ => None,
     }
 }
@@ -40,5 +44,7 @@ pub fn pool_state_from_bytes(
         DexType::PumpSwap => pumpswap::decode_bytes(address, data),
         DexType::Bonk => bonk::decode_bytes(address, data),
         DexType::MeteoraDammV2 => meteora_damm_v2::decode_bytes(address, data),
+        DexType::MeteoraDlmm => meteora_dlmm::decode_bytes(address, data),
+        DexType::OrcaWhirlpool => orca_whirlpool::decode_bytes(address, data),
     }
 }

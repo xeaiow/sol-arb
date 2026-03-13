@@ -50,6 +50,15 @@ const PUMPSWAP_FEE_PROGRAM: Pubkey = solana_sdk::pubkey!("pfeeUxB6jkeY1Hxd7CsFCA
 // ── Meteora DAMM V2 constants ──
 const METEORA_DAMM_V2_PROGRAM: Pubkey = solana_sdk::pubkey!("cpamdpZCGKUy5JxQXB4dcpGPiikHawvSWAd6mEn1sGG");
 
+// ── Meteora DLMM constants ──
+const METEORA_DLMM_PROGRAM: Pubkey = solana_sdk::pubkey!("LBUZKhRxPF3XUpBCjp4YzTKgLccjZhTSDM9YuVaPwxo");
+
+// ── Orca Whirlpool constants ──
+const ORCA_WHIRLPOOL_PROGRAM: Pubkey = solana_sdk::pubkey!("whirLbMiicVdio4qvUfM5KAg6Ct8VwpYzGff3uctyCc");
+
+/// SPL Memo program v2 (required by DLMM swap2 and Whirlpool swap_v2)
+const SPL_MEMO_PROGRAM_ID: Pubkey = solana_sdk::pubkey!("MemoSq4gqABAXKb96qnH8TysNcWxMyWCqXgDLGmfcHr");
+
 /// SPL Token program ID
 const SPL_TOKEN_PROGRAM_ID: Pubkey = solana_sdk::pubkey!("TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA");
 /// Token-2022 program ID
@@ -305,32 +314,45 @@ impl TxBuilder {
         }
     }
 
-    /// Calculate extra accounts for each hop (CLMM: unique tick arrays beyond the first).
+    /// Calculate extra accounts for each hop.
+    /// CLMM: unique tick arrays beyond the first (base includes 1 tick array in 10 accounts).
+    /// DLMM: bin arrays as remaining accounts (all are extra, base is 16 fixed accounts).
     fn hop_extra_accounts(snap: &PoolSnapshot) -> u8 {
-        if snap.dex_type != DexType::RaydiumClmm {
-            return 0;
-        }
-        // extra[2..] are tick arrays; count unique ones minus 1 (first is in base 10)
         let extra = if snap.accounts.len() > 3 { &snap.accounts[3..] } else { return 0 };
-        let tick_arrays: Vec<&Pubkey> = if extra.len() > 2 {
-            extra[2..].iter().collect()
-        } else {
-            return 0;
-        };
-        if tick_arrays.is_empty() {
-            return 0;
-        }
-        let mut unique = vec![tick_arrays[0]];
-        for ta in tick_arrays.iter().skip(1) {
-            if !unique.contains(ta) {
-                unique.push(ta);
+
+        match snap.dex_type {
+            DexType::RaydiumClmm => {
+                // extra[0]=amm_config, extra[1]=observation_key, extra[2..]=tick_arrays
+                let tick_arrays: Vec<&Pubkey> = if extra.len() > 2 {
+                    extra[2..].iter().collect()
+                } else {
+                    return 0;
+                };
+                if tick_arrays.is_empty() {
+                    return 0;
+                }
+                let mut unique = vec![tick_arrays[0]];
+                for ta in tick_arrays.iter().skip(1) {
+                    if !unique.contains(ta) {
+                        unique.push(ta);
+                    }
+                    if unique.len() >= 3 {
+                        break;
+                    }
+                }
+                // extra_accounts = unique count - 1 (first tick array is in base 10 accounts)
+                (unique.len() - 1) as u8
             }
-            if unique.len() >= 3 {
-                break;
+            DexType::MeteoraDlmm => {
+                // extra[0]=oracle, extra[1..]=bin_arrays (all bin arrays are extra)
+                if extra.len() > 1 {
+                    (extra.len() - 1).min(3) as u8
+                } else {
+                    0
+                }
             }
+            _ => 0,
         }
-        // extra_accounts = unique count - 1 (first tick array is in base 10 accounts)
-        (unique.len() - 1) as u8
     }
 
     fn encode_instruction_data(&self, opp: &Opportunity, hop_count: u8) -> Vec<u8> {
@@ -456,6 +478,8 @@ impl TxBuilder {
                 DexType::PumpSwap => PUMPSWAP_PROGRAM,
                 DexType::Bonk => BONKSWAP_PROGRAM,
                 DexType::MeteoraDammV2 => METEORA_DAMM_V2_PROGRAM,
+                DexType::MeteoraDlmm => METEORA_DLMM_PROGRAM,
+                DexType::OrcaWhirlpool => ORCA_WHIRLPOOL_PROGRAM,
             };
             if !dex_programs.contains(&prog) {
                 dex_programs.push(prog);
@@ -800,6 +824,112 @@ impl TxBuilder {
                     AccountMeta::new(referral_token_account, false),        // [11] referral_token_account
                     AccountMeta::new_readonly(event_authority, false),      // [12] event_authority
                     AccountMeta::new_readonly(METEORA_DAMM_V2_PROGRAM, false), // [13] program
+                ]
+            }
+
+            // Meteora DLMM: 16 fixed accounts + remaining bin_arrays
+            // swap.rs: [lb_pair, bin_array_bitmap_extension, reserve_x, reserve_y,
+            //  user_token_in, user_token_out, token_x_mint, token_y_mint, oracle,
+            //  host_fee_in, user, token_x_program, token_y_program, memo_program,
+            //  event_authority, program, ...bin_arrays]
+            // extra[0]=oracle, extra[1..]=bin_array PDAs (if available)
+            DexType::MeteoraDlmm => {
+                let oracle = extra.first().copied().unwrap_or_default();
+                let token_x_prog = if snap.mint_a_is_2022 { TOKEN_2022_PROGRAM_ID } else { SPL_TOKEN_PROGRAM_ID };
+                let token_y_prog = if snap.mint_b_is_2022 { TOKEN_2022_PROGRAM_ID } else { SPL_TOKEN_PROGRAM_ID };
+                // bin_array_bitmap_extension PDA: ["bitmap", lb_pair]
+                let (bitmap_ext, _) = Pubkey::find_program_address(
+                    &[b"bitmap", pool.as_ref()],
+                    &METEORA_DLMM_PROGRAM,
+                );
+                // host_fee_in: pass system program as placeholder (no host fee)
+                let host_fee_in = SYSTEM_PROGRAM_ID;
+                // event_authority PDA: ["__event_authority"]
+                let (event_authority, _) = Pubkey::find_program_address(
+                    &[b"__event_authority"],
+                    &METEORA_DLMM_PROGRAM,
+                );
+                let mut metas = vec![
+                    AccountMeta::new(pool, false),                              // [0] lb_pair
+                    AccountMeta::new_readonly(bitmap_ext, false),                // [1] bin_array_bitmap_extension
+                    AccountMeta::new(vault_a.unwrap_or_default(), false),        // [2] reserve_x
+                    AccountMeta::new(vault_b.unwrap_or_default(), false),        // [3] reserve_y
+                    AccountMeta::new(user_input_ata, false),                     // [4] user_token_in
+                    AccountMeta::new(user_output_ata, false),                    // [5] user_token_out
+                    AccountMeta::new_readonly(snap.mint_a, false),               // [6] token_x_mint
+                    AccountMeta::new_readonly(snap.mint_b, false),               // [7] token_y_mint
+                    AccountMeta::new(oracle, false),                             // [8] oracle
+                    AccountMeta::new(host_fee_in, false),                        // [9] host_fee_in
+                    AccountMeta::new_readonly(self.payer_pubkey, true),           // [10] user
+                    AccountMeta::new_readonly(token_x_prog, false),              // [11] token_x_program
+                    AccountMeta::new_readonly(token_y_prog, false),              // [12] token_y_program
+                    AccountMeta::new_readonly(SPL_MEMO_PROGRAM_ID, false),        // [13] memo_program
+                    AccountMeta::new_readonly(event_authority, false),            // [14] event_authority
+                    AccountMeta::new_readonly(METEORA_DLMM_PROGRAM, false),      // [15] program
+                ];
+                // Append bin_array remaining accounts (extra[1..])
+                let bin_arrays = if extra.len() > 1 { &extra[1..] } else { &[] };
+                if bin_arrays.is_empty() {
+                    log::warn!("DLMM bin_arrays missing for pool {}, skipping hop", pool);
+                    return vec![];
+                }
+                for ba in bin_arrays {
+                    metas.push(AccountMeta::new(*ba, false));
+                }
+                metas
+            }
+
+            // Orca Whirlpool: 15 accounts
+            // swap.rs: [token_program_a, token_program_b, memo_program,
+            //  token_authority, whirlpool, token_mint_a, token_mint_b,
+            //  token_owner_account_a, token_vault_a, token_owner_account_b, token_vault_b,
+            //  tick_array_0, tick_array_1, tick_array_2, oracle]
+            // extra[0]=oracle, extra[1..]=tick_array PDAs
+            DexType::OrcaWhirlpool => {
+                let oracle = extra.first().copied().unwrap_or_default();
+                let tick_arrays: Vec<Pubkey> = if extra.len() > 1 {
+                    extra[1..].to_vec()
+                } else {
+                    vec![]
+                };
+                if tick_arrays.is_empty() || tick_arrays[0] == Pubkey::default() {
+                    log::warn!("Whirlpool tick_array missing for pool {}, skipping hop", pool);
+                    return vec![];
+                }
+                let token_a_prog = if snap.mint_a_is_2022 { TOKEN_2022_PROGRAM_ID } else { SPL_TOKEN_PROGRAM_ID };
+                let token_b_prog = if snap.mint_b_is_2022 { TOKEN_2022_PROGRAM_ID } else { SPL_TOKEN_PROGRAM_ID };
+                let user_ata_a = derive_ata_with_program(&self.payer_pubkey, &snap.mint_a, &token_a_prog);
+                let user_ata_b = derive_ata_with_program(&self.payer_pubkey, &snap.mint_b, &token_b_prog);
+                // Deduplicate tick arrays
+                let mut unique_tas = vec![tick_arrays[0]];
+                for ta in tick_arrays.iter().skip(1) {
+                    if !unique_tas.contains(ta) {
+                        unique_tas.push(*ta);
+                    }
+                    if unique_tas.len() >= 3 {
+                        break;
+                    }
+                }
+                // Pad to exactly 3 tick arrays (Whirlpool requires exactly 3)
+                while unique_tas.len() < 3 {
+                    unique_tas.push(*unique_tas.last().unwrap());
+                }
+                vec![
+                    AccountMeta::new_readonly(token_a_prog, false),             // [0] token_program_a
+                    AccountMeta::new_readonly(token_b_prog, false),             // [1] token_program_b
+                    AccountMeta::new_readonly(SPL_MEMO_PROGRAM_ID, false),       // [2] memo_program
+                    AccountMeta::new_readonly(self.payer_pubkey, true),           // [3] token_authority
+                    AccountMeta::new(pool, false),                              // [4] whirlpool
+                    AccountMeta::new_readonly(snap.mint_a, false),              // [5] token_mint_a
+                    AccountMeta::new_readonly(snap.mint_b, false),              // [6] token_mint_b
+                    AccountMeta::new(user_ata_a, false),                        // [7] token_owner_account_a
+                    AccountMeta::new(vault_a.unwrap_or_default(), false),        // [8] token_vault_a
+                    AccountMeta::new(user_ata_b, false),                        // [9] token_owner_account_b
+                    AccountMeta::new(vault_b.unwrap_or_default(), false),        // [10] token_vault_b
+                    AccountMeta::new(unique_tas[0], false),                     // [11] tick_array_0
+                    AccountMeta::new(unique_tas[1], false),                     // [12] tick_array_1
+                    AccountMeta::new(unique_tas[2], false),                     // [13] tick_array_2
+                    AccountMeta::new(oracle, false),                            // [14] oracle
                 ]
             }
         }

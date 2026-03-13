@@ -15,6 +15,8 @@ use solana_sdk::signer::keypair::read_keypair_file;
 use solana_streamer_sdk::pool::streamer::{PoolStreamer, PoolStreamerConfig};
 use solana_streamer_sdk::streaming::event_parser::protocols::{
     bonk::parser::BONK_PROGRAM_ID, meteora_damm_v2::parser::METEORA_DAMM_V2_PROGRAM_ID,
+    meteora_dlmm::parser::METEORA_DLMM_PROGRAM_ID,
+    orca_whirlpool::parser::ORCA_WHIRLPOOL_PROGRAM_ID,
     pumpfun::parser::PUMPFUN_PROGRAM_ID, pumpswap::parser::PUMPSWAP_PROGRAM_ID,
     raydium_amm_v4::parser::RAYDIUM_AMM_V4_PROGRAM_ID,
     raydium_clmm::parser::RAYDIUM_CLMM_PROGRAM_ID,
@@ -116,6 +118,8 @@ async fn main() -> anyhow::Result<()> {
         Protocol::RaydiumClmm,
         Protocol::RaydiumAmmV4,
         Protocol::MeteoraDammV2,
+        Protocol::MeteoraDlmm,
+        Protocol::OrcaWhirlpool,
     ];
 
     let program_ids = vec![
@@ -126,6 +130,8 @@ async fn main() -> anyhow::Result<()> {
         RAYDIUM_CLMM_PROGRAM_ID.to_string(),
         RAYDIUM_AMM_V4_PROGRAM_ID.to_string(),
         METEORA_DAMM_V2_PROGRAM_ID.to_string(),
+        METEORA_DLMM_PROGRAM_ID.to_string(),
+        ORCA_WHIRLPOOL_PROGRAM_ID.to_string(),
     ];
 
     let transaction_filter = TransactionFilter {

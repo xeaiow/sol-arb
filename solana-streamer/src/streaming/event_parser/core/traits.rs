@@ -8,6 +8,8 @@ use crate::streaming::event_parser::core::common_event_parser::{
 use crate::streaming::event_parser::protocols::block::block_meta_event::BlockMetaEvent;
 use crate::streaming::event_parser::protocols::bonk::events::*;
 use crate::streaming::event_parser::protocols::meteora_damm_v2::events::*;
+use crate::streaming::event_parser::protocols::meteora_dlmm::events::*;
+use crate::streaming::event_parser::protocols::orca_whirlpool::events::*;
 use crate::streaming::event_parser::protocols::pumpfun::events::*;
 use crate::streaming::event_parser::protocols::pumpswap::events::*;
 use crate::streaming::event_parser::protocols::raydium_amm_v4::events::*;
@@ -82,6 +84,15 @@ pub enum DexEvent {
     MeteoraDammV2InitializePoolWithDynamicConfigEvent(MeteoraDammV2InitializePoolWithDynamicConfigEvent),
     MeteoraDammV2PoolStateAccountEvent(MeteoraDammV2PoolStateAccountEvent),
 
+    // Meteora DLMM events
+    MeteoraDlmmSwap2Event(MeteoraDlmmSwap2Event),
+    MeteoraDlmmLbPairAccountEvent(MeteoraDlmmLbPairAccountEvent),
+
+    // Orca Whirlpool events
+    OrcaWhirlpoolSwapV2Event(OrcaWhirlpoolSwapV2Event),
+    OrcaWhirlpoolAccountEvent(OrcaWhirlpoolAccountEvent),
+    OrcaWhirlpoolTickArrayAccountEvent(OrcaWhirlpoolTickArrayAccountEvent),
+
     // Common events
     TokenAccountEvent(TokenAccountEvent),
     NonceAccountEvent(NonceAccountEvent),
@@ -143,6 +154,11 @@ impl DexEvent {
             DexEvent::MeteoraDammV2InitializeCustomizablePoolEvent(e) => &e.metadata,
             DexEvent::MeteoraDammV2InitializePoolWithDynamicConfigEvent(e) => &e.metadata,
             DexEvent::MeteoraDammV2PoolStateAccountEvent(e) => &e.metadata,
+            DexEvent::MeteoraDlmmSwap2Event(e) => &e.metadata,
+            DexEvent::MeteoraDlmmLbPairAccountEvent(e) => &e.metadata,
+            DexEvent::OrcaWhirlpoolSwapV2Event(e) => &e.metadata,
+            DexEvent::OrcaWhirlpoolAccountEvent(e) => &e.metadata,
+            DexEvent::OrcaWhirlpoolTickArrayAccountEvent(e) => &e.metadata,
             DexEvent::TokenAccountEvent(e) => &e.metadata,
             DexEvent::NonceAccountEvent(e) => &e.metadata,
             DexEvent::TokenInfoEvent(e) => &e.metadata,
@@ -203,6 +219,11 @@ impl DexEvent {
             DexEvent::MeteoraDammV2InitializeCustomizablePoolEvent(e) => &mut e.metadata,
             DexEvent::MeteoraDammV2InitializePoolWithDynamicConfigEvent(e) => &mut e.metadata,
             DexEvent::MeteoraDammV2PoolStateAccountEvent(e) => &mut e.metadata,
+            DexEvent::MeteoraDlmmSwap2Event(e) => &mut e.metadata,
+            DexEvent::MeteoraDlmmLbPairAccountEvent(e) => &mut e.metadata,
+            DexEvent::OrcaWhirlpoolSwapV2Event(e) => &mut e.metadata,
+            DexEvent::OrcaWhirlpoolAccountEvent(e) => &mut e.metadata,
+            DexEvent::OrcaWhirlpoolTickArrayAccountEvent(e) => &mut e.metadata,
             DexEvent::TokenAccountEvent(e) => &mut e.metadata,
             DexEvent::NonceAccountEvent(e) => &mut e.metadata,
             DexEvent::TokenInfoEvent(e) => &mut e.metadata,
