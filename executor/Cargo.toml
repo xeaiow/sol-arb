@@ -33,5 +33,9 @@ solana-account-decoder = "3.1.9"
 name = "verify_damm_v2"
 path = "src/bin/verify_damm_v2.rs"
 
+[[bin]]
+name = "verify_dlmm"
+path = "src/bin/verify_dlmm.rs"
+
 [build-dependencies]
 tonic-build = "0.12"

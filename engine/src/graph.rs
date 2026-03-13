@@ -175,7 +175,16 @@ impl TokenGraph {
             PoolMath::DammV2Concentrated { fee_numerator, .. } => {
                 *fee_numerator as f64 / 1_000_000_000.0
             }
-            PoolMath::MeteoraDlmm { .. } => 0.0,
+            PoolMath::MeteoraDlmm { base_factor, bin_step, variable_fee_control, volatility_accumulator, .. } => {
+                let base = *base_factor as f64 * *bin_step as f64 * 10.0 / 1_000_000_000.0;
+                let var = if *variable_fee_control > 0 {
+                    let va_bin = *volatility_accumulator as f64 * *bin_step as f64;
+                    (*variable_fee_control as f64 * va_bin * va_bin / 100_000_000_000.0).min(0.1)
+                } else {
+                    0.0
+                };
+                (base + var).min(0.1)
+            }
         }
     }
 

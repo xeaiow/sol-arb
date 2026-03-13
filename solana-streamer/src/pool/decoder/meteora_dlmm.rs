@@ -63,16 +63,32 @@ struct DlmmFeeParams {
 /// Parse fee parameters from raw LbPair account bytes.
 ///
 /// LbPair layout (after 8-byte Anchor discriminator):
-///   parameters.base_factor: u16     offset 8
-///   variable_fee_control: u32       offset 16
-///   max_volatility_accumulator: u32 offset 20
-///   v_parameters.volatility_accumulator: u32 offset 40
-///   v_parameters.volatility_reference: u32   offset 44
-///   v_parameters.index_reference: i32        offset 48
-///   active_id: i32                  offset 84
-///   bin_step: u16                   offset 88
+///   StaticParameters (32 bytes, offset 8..40):
+///     base_factor: u16              offset 8
+///     filter_period: u16            offset 10
+///     decay_period: u16             offset 12
+///     reduction_factor: u16         offset 14
+///     variable_fee_control: u32     offset 16
+///     max_volatility_accumulator: u32 offset 20
+///     min_bin_id: i32               offset 24
+///     max_bin_id: i32               offset 28
+///     protocol_share: u16           offset 32
+///     base_fee_power_factor: u8     offset 34
+///     padding: [u8; 5]              offset 35
+///   VariableParameters (32 bytes, offset 40..72):
+///     volatility_accumulator: u32   offset 40
+///     volatility_reference: u32     offset 44
+///     index_reference: i32          offset 48
+///     padding: [u8; 4]              offset 52
+///     last_update_timestamp: i64    offset 56
+///     padding1: [u8; 8]             offset 64
+///   bump_seed: [u8; 1]             offset 72
+///   bin_step_seed: [u8; 2]         offset 73
+///   pair_type: u8                  offset 75
+///   active_id: i32                 offset 76
+///   bin_step: u16                  offset 80
 fn parse_fee_params(data: &[u8]) -> Option<DlmmFeeParams> {
-    if data.len() < 90 {
+    if data.len() < 82 {
         return None;
     }
     Some(DlmmFeeParams {
@@ -82,8 +98,8 @@ fn parse_fee_params(data: &[u8]) -> Option<DlmmFeeParams> {
         volatility_accumulator: u32::from_le_bytes(data[40..44].try_into().ok()?),
         volatility_reference: u32::from_le_bytes(data[44..48].try_into().ok()?),
         index_reference: i32::from_le_bytes(data[48..52].try_into().ok()?),
-        active_id: i32::from_le_bytes(data[84..88].try_into().ok()?),
-        bin_step: u16::from_le_bytes(data[88..90].try_into().ok()?),
+        active_id: i32::from_le_bytes(data[76..80].try_into().ok()?),
+        bin_step: u16::from_le_bytes(data[80..82].try_into().ok()?),
     })
 }
 
@@ -135,20 +151,24 @@ pub fn decode(event: &MeteoraDlmmLbPairAccountEvent) -> Option<PoolState> {
 /// Decode from raw account bytes.
 ///
 /// LbPair layout (after 8-byte Anchor discriminator):
-///   parameters.base_factor: u16     offset 8
-///   variable_fee_control: u32       offset 16
-///   max_volatility_accumulator: u32 offset 20
-///   v_parameters.volatility_accumulator: u32 offset 40
-///   v_parameters.volatility_reference: u32   offset 44
-///   v_parameters.index_reference: i32        offset 48
-///   active_id: i32                  offset 84
-///   bin_step: u16                   offset 88
-///   status: u8                      offset 90
-///   token_x_mint: Pubkey (32)       offset 96
-///   token_y_mint: Pubkey (32)       offset 128
-///   reserve_x: Pubkey (32)          offset 160
-///   reserve_y: Pubkey (32)          offset 192
-///   oracle: Pubkey (32)             offset 560
+///   StaticParameters:  32 bytes    offset 8..40
+///   VariableParameters: 32 bytes   offset 40..72
+///   bump_seed: [u8; 1]            offset 72
+///   bin_step_seed: [u8; 2]        offset 73
+///   pair_type: u8                 offset 75
+///   active_id: i32                offset 76
+///   bin_step: u16                 offset 80
+///   status: u8                    offset 82
+///   require_base_factor_seed: u8  offset 83
+///   base_factor_seed: [u8; 2]    offset 84
+///   activation_type: u8          offset 86
+///   creator_pool_on_off_control: u8 offset 87
+///   token_x_mint: Pubkey (32)     offset 88
+///   token_y_mint: Pubkey (32)     offset 120
+///   reserve_x: Pubkey (32)        offset 152
+///   reserve_y: Pubkey (32)        offset 184
+///   ...
+///   oracle: Pubkey (32)           offset 552
 ///
 /// Minimum: 904 bytes total
 pub fn decode_bytes(address: &Pubkey, data: &[u8]) -> Option<PoolState> {
@@ -158,14 +178,14 @@ pub fn decode_bytes(address: &Pubkey, data: &[u8]) -> Option<PoolState> {
 
     let params = parse_fee_params(data)?;
 
-    let token_x_mint = Pubkey::try_from(&data[96..128]).ok()?;
-    let token_y_mint = Pubkey::try_from(&data[128..160]).ok()?;
-    let reserve_x = Pubkey::try_from(&data[160..192]).ok()?;
-    let reserve_y = Pubkey::try_from(&data[192..224]).ok()?;
+    let token_x_mint = Pubkey::try_from(&data[88..120]).ok()?;
+    let token_y_mint = Pubkey::try_from(&data[120..152]).ok()?;
+    let reserve_x = Pubkey::try_from(&data[152..184]).ok()?;
+    let reserve_y = Pubkey::try_from(&data[184..216]).ok()?;
 
-    // oracle at offset 560
-    let oracle = if data.len() >= 592 {
-        Pubkey::try_from(&data[560..592]).ok()?
+    // oracle at offset 552
+    let oracle = if data.len() >= 584 {
+        Pubkey::try_from(&data[552..584]).ok()?
     } else {
         Pubkey::default()
     };
@@ -243,16 +263,16 @@ mod tests {
         data[0..8].copy_from_slice(&[33, 11, 49, 98, 181, 101, 177, 13]);
         // base_factor = 10000
         data[8..10].copy_from_slice(&10000u16.to_le_bytes());
-        // bin_step = 10
-        data[88..90].copy_from_slice(&10u16.to_le_bytes());
-        // token_x_mint
-        data[96..128].copy_from_slice(&[1u8; 32]);
-        // token_y_mint
-        data[128..160].copy_from_slice(&[2u8; 32]);
-        // reserve_x
-        data[160..192].copy_from_slice(&[3u8; 32]);
-        // reserve_y
-        data[192..224].copy_from_slice(&[4u8; 32]);
+        // bin_step = 10 (offset 80)
+        data[80..82].copy_from_slice(&10u16.to_le_bytes());
+        // token_x_mint (offset 88)
+        data[88..120].copy_from_slice(&[1u8; 32]);
+        // token_y_mint (offset 120)
+        data[120..152].copy_from_slice(&[2u8; 32]);
+        // reserve_x (offset 152)
+        data[152..184].copy_from_slice(&[3u8; 32]);
+        // reserve_y (offset 184)
+        data[184..216].copy_from_slice(&[4u8; 32]);
 
         let address = Pubkey::new_unique();
         let pool = decode_bytes(&address, &data).unwrap();
