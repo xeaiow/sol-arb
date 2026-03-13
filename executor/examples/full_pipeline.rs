@@ -88,6 +88,9 @@ async fn main() -> anyhow::Result<()> {
     };
     let (pool_streamer, update_rx) = PoolStreamer::new(streamer_config);
     let pool_streamer = Arc::new(pool_streamer);
+    let sub_notify = pool_streamer.subscription_notify();
+    let vault_notify = pool_streamer.vault_notify();
+    let tick_notify = pool_streamer.tick_reload_notify();
     eprintln!("Stage 1 (PoolStreamer) ready");
 
     // ── Stage 2: Engine ─────────────────────────────────────────────────
@@ -165,12 +168,8 @@ async fn main() -> anyhow::Result<()> {
     let sub_program_ids = program_ids.clone();
     let subscription_updater = async move {
         let mut cumulative_accounts: Vec<String> = Vec::new();
-        let mut interval = tokio::time::interval(std::time::Duration::from_secs(2));
         loop {
-            interval.tick().await;
-
-            // Also flush tick reloads (still needs RPC for initial data, but registers for gRPC)
-            sub_streamer.flush_tick_reloads().await;
+            sub_notify.notified().await;
 
             // Drain newly discovered vault/tick array addresses
             let new_accounts = sub_streamer.drain_pending_subscriptions().await;
@@ -218,10 +217,18 @@ async fn main() -> anyhow::Result<()> {
     // ── Vault balance initial fetch (RPC fallback for vaults not yet pushed by gRPC) ──
     let vault_streamer = pool_streamer.clone();
     let vault_fetcher = async move {
-        let mut interval = tokio::time::interval(std::time::Duration::from_secs(2));
         loop {
-            interval.tick().await;
+            vault_notify.notified().await;
             vault_streamer.flush_pending_vaults().await;
+        }
+    };
+
+    // ── Tick array reload (RPC fetch for CLMM tick arrays on notify) ──
+    let tick_streamer = pool_streamer.clone();
+    let tick_reloader = async move {
+        loop {
+            tick_notify.notified().await;
+            tick_streamer.flush_tick_reloads().await;
         }
     };
 
@@ -238,6 +245,9 @@ async fn main() -> anyhow::Result<()> {
         }
         _ = vault_fetcher => {
             eprintln!("Vault fetcher exited");
+        }
+        _ = tick_reloader => {
+            eprintln!("Tick reloader exited");
         }
         _ = tokio::signal::ctrl_c() => {
             eprintln!("\nShutting down...");
