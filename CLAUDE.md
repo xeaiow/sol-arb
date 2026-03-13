@@ -9,7 +9,8 @@
 solana-streamer/   — Stage 1: 資料層（獨立 git repo: solana-streamer-sdk）
 engine/            — Stage 2: 路由引擎
 executor/          — Stage 3: 交易組裝與發送
-program/           — Solana 鏈上程式（Anchor）
+program/           — Solana 鏈上程式（pinocchio 原生，非 Anchor）
+dex-pinocchio-cpi/ — DEX CPI 封裝（自開發，需 git pull 才有）
 ```
 
 ### Pipeline 完整流程
@@ -74,7 +75,11 @@ program/           — Solana 鏈上程式（Anchor）
 - `SwapV2` 的 `sqrt_price_limit`：a_to_b 用 `MIN_SQRT_PRICE_X64 = 4295048016`，b_to_a 用 `MAX_SQRT_PRICE_X64`
 - Oracle PDA: `["oracle", whirlpool]`
 
-### PumpSwap Buy/Sell 帳戶佈局差異
+### PumpSwap Buy/Sell 方向與帳戶佈局
+- PumpSwap `mint_a = base`（token），`mint_b = quote`（SOL）
+- **方向語意**：engine 的 `is_a_to_b=true`（base→quote）= **sell**，`is_a_to_b=false`（quote→base）= **buy**
+- swap.rs 的 `if !is_a_to_b` 分支是 buy，`else` 分支是 sell（**不要搞反**）
+- `input_ata_index`：sell(a_to_b) 讀 base[5]，buy(!a_to_b) 讀 quote[6]
 - Buy = 23 帳戶，Sell = 21 帳戶（Sell 沒有 `global_volume_accumulator` 和 `user_volume_accumulator`）
 - **off-chain 統一傳 23 帳戶（Buy 佈局）**，on-chain Sell 跳過 [19][20]，用 [21]=`fee_config`、[22]=`fee_program`
 - 如果 Sell 用 [19] 作 `fee_config` 會導致 0xbbf (AccountOwnedByWrongProgram)——因為 [19] 是 volume accumulator PDA
@@ -89,6 +94,8 @@ program/           — Solana 鏈上程式（Anchor）
 - 輸入金額超過已載入 tick array 範圍會報 `NotEnoughTickArrayAccount (6027)`
 - `clmm_cap_input()` 用 `limit_in_a` / `limit_in_b` 限制第一跳 CLMM 輸入量
 - 載入 7 個 tick arrays（current ± 3），提升大額交易報價準確度
+- **`clmm_get_amount_out()` 不可在 tick 用盡後繼續報價**——假設無限流動性會產生虛假巨額利潤（10-84 SOL），on-chain 實際上輸出遠低於報價，導致 Custom(1) loss error
+- `InvalidFirstTickArrayAccount (6028)`：tick_current 已移動但 tick array PDA 還是舊的
 
 ### CP 池 Reserve/Fee 保留
 - `update_math()` CP 分支必須保留現有 reserves（decoder 回傳 0 時）和 fees
@@ -157,6 +164,27 @@ RPC endpoint: 用 config.toml 中的 `rpc_url`，或 fallback 到 `https://mainn
 - **沒用到的程式碼就刪掉**——不要留死碼或向後相容 shim
 - **有需要改就改**——分析效能後選最佳方案，不分鏈上鏈下
 - **部署鏈上程式前必須先確認**——每次 deploy 都花錢
+
+### 鏈上程式部署流程
+1. **確認 `dex-pinocchio-cpi/` 存在**——不在 sol-arb repo 裡，需另外 `git pull`
+2. **Build SBF**：`cd program && cargo build-sbf`（產出 `target/deploy/arb_program.so`）
+3. **Solana tools 版本**：pinocchio 0.10+ 需要 rustc 1.84+，用 `agave-install update` 更新
+4. **Deploy**：
+   ```bash
+   solana program deploy target/deploy/arb_program.so \
+     --program-id 8NwGVcMu96JTJwfUKQNXjYMd87JyGWcPkaENe9NPzLCV \
+     --url https://api.mainnet-beta.solana.com \
+     --keypair ~/.config/solana/id.json \
+     --with-compute-unit-price 100000
+   ```
+   - **不能用 Helius RPC deploy**——不支援 preflight check，會報 `Invalid Request`
+   - 用公共 mainnet RPC（`https://api.mainnet-beta.solana.com`）
+   - Upgrade authority: `A6m1zY2dM2ue4Aem6q2WSZyS3CX4ap39ApyJSCXhB5Fq`（同 payer）
+   - Deploy 約需 0.42 SOL（buffer rent），成功後會退回
+5. **Deploy 失敗處理**：
+   - 餘額不足：先充值到 payer 地址
+   - Buffer 殘留：`solana program close <BUFFER_ADDRESS>` 回收 lamports
+   - 如果 buffer 找不到（已被清理），lamports 已退回，直接重試即可
 
 ### 設定管理
 - `executor/config.toml` 含 API key，已加入 `.gitignore`

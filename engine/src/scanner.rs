@@ -273,6 +273,7 @@ impl Scanner {
         let ternary_iters = self.config.ternary_iterations;
         let min_profit = self.config.min_profit_lamports;
         let max_profit_ratio = self.config.max_profit_ratio;
+        let max_abs_profit = self.config.max_absolute_profit_lamports;
 
         let mut evaluated: Vec<(Route, u64, u64)> = top_candidates.par_iter()
             .filter_map(|(_, route, _)| {
@@ -283,6 +284,9 @@ impl Scanner {
                     return None;
                 }
                 if amount_in > 0 && (profit as f64 / amount_in as f64) > max_profit_ratio {
+                    return None;
+                }
+                if profit > max_abs_profit {
                     return None;
                 }
                 Some((route.clone(), amount_in, profit))

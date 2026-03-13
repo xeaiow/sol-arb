@@ -291,13 +291,9 @@ fn clmm_get_amount_out(
             }
         }
 
-        // Remaining in current range (no more ticks)
-        if remaining > 0.0 && liq > 0.0 {
-            let new_sqrt_price = liq * sqrt_price / (liq + remaining * sqrt_price);
-            if new_sqrt_price > 0.0 {
-                amount_out += liq * (sqrt_price - new_sqrt_price);
-            }
-        }
+        // No more loaded ticks — stop quoting. Continuing would assume
+        // unbounded liquidity beyond loaded tick arrays, producing phantom
+        // output that doesn't exist on-chain (causes Custom(1) loss errors).
     } else {
         // Price goes up: traverse ticks above current tick
         let relevant: Vec<&&Tick> = initialized_ticks
@@ -342,13 +338,7 @@ fn clmm_get_amount_out(
             }
         }
 
-        // Remaining in current range
-        if remaining > 0.0 && liq > 0.0 {
-            let new_sqrt_price = sqrt_price + remaining / liq;
-            if new_sqrt_price > 0.0 && sqrt_price > 0.0 {
-                amount_out += liq * (1.0 / sqrt_price - 1.0 / new_sqrt_price);
-            }
-        }
+        // No more loaded ticks — stop quoting (same as a_to_b branch).
     }
 
     // Apply conservative haircut to account for f64 precision loss on u128 values.

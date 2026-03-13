@@ -97,8 +97,8 @@ fn dispatch_swap(hop: &HopInfo, pool_accounts: &[AccountView], amount_in: u64) -
             DexType::RaydiumCpmm => 4,   // input_token_account
             DexType::RaydiumClmm => 3,   // input_token_account
             DexType::PumpFun => 5,       // associated_user (token ATA, used for both buy/sell)
-            DexType::PumpSwap => if hop.is_a_to_b { 6 } else { 5 },
-                // buy: input=quote [6], sell: input=base [5]
+            DexType::PumpSwap => if hop.is_a_to_b { 5 } else { 6 },
+                // a_to_b (sell): input=base [5], b_to_a (buy): input=quote [6]
             DexType::Bonk => 6,          // swapper_x_account
             DexType::MeteoraDammV2 => 2, // input_token_account
         DexType::MeteoraDlmm => 4, // user_token_in
@@ -281,8 +281,11 @@ fn swap_pumpfun(accounts: &[AccountView], is_a_to_b: bool, amount_in: u64) -> Pr
 }
 
 /// PumpSwap (pump_fun_amm): buy or sell based on direction (buy=23 accts, sell=21 accts).
+/// PumpSwap mint_a = base (token), mint_b = quote (SOL).
+/// is_a_to_b = true means token→SOL = sell; is_a_to_b = false means SOL→token = buy.
 fn swap_pumpswap(accounts: &[AccountView], is_a_to_b: bool, amount_in: u64) -> ProgramResult {
-    if is_a_to_b {
+    if !is_a_to_b {
+        // Buy: SOL (quote) → token (base), i.e. b→a
         let buy_accounts = dex_pinocchio_cpi::pump_fun_amm::BuyAccounts {
             pool: &accounts[0],
             user: &accounts[1],
@@ -315,6 +318,7 @@ fn swap_pumpswap(accounts: &[AccountView], is_a_to_b: bool, amount_in: u64) -> P
         };
         dex_pinocchio_cpi::pump_fun_amm::buy(&buy_accounts, &args, &[])
     } else {
+        // Sell: token (base) → SOL (quote), i.e. a→b
         // Off-chain always sends 23 accounts in Buy layout.
         // Sell has no volume accumulators — [19],[20] are unused padding.
         // fee_config=[21], fee_program=[22] (same positions as Buy).

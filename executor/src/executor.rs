@@ -1,9 +1,12 @@
+use std::collections::HashMap;
 use std::sync::Arc;
+use std::time::Instant;
 use log::{info, debug, warn};
 use solana_client::nonblocking::rpc_client::RpcClient;
 use solana_client::rpc_config::RpcSimulateTransactionConfig;
 use solana_commitment_config::CommitmentConfig;
 use solana_sdk::hash::Hash;
+use solana_sdk::pubkey::Pubkey;
 use solana_sdk::signer::{keypair::Keypair, Signer};
 use tokio::sync::mpsc;
 
@@ -15,8 +18,30 @@ use crate::marginfi::MarginFiState;
 use crate::sender::MultiSender;
 use crate::tx_builder::TxBuilder;
 
+/// Compact key for simulation failure blacklisting: sorted pool addresses (up to 4 hops)
+type SimBlacklistKey = ([Pubkey; 4], u8);
+
+fn sim_blacklist_key(opp: &Opportunity) -> SimBlacklistKey {
+    let mut addrs = [Pubkey::default(); 4];
+    let count = opp.pool_snapshots.len().min(4);
+    for (i, snap) in opp.pool_snapshots.iter().take(4).enumerate() {
+        addrs[i] = snap.address;
+    }
+    (addrs, count as u8)
+}
+
+/// Tracks consecutive simulation failures for a route
+struct SimFailEntry {
+    count: u32,
+    blacklisted_at: Instant,
+}
+
 /// Shared blockhash provider — fed by gRPC BlockMeta events.
 pub type SharedBlockhash = Arc<tokio::sync::RwLock<Option<Hash>>>;
+
+/// Blacklist duration: routes that fail simulation 3+ times are suppressed for 30 seconds
+const SIM_BLACKLIST_THRESHOLD: u32 = 3;
+const SIM_BLACKLIST_DURATION_SECS: u64 = 30;
 
 pub struct Executor {
     _config: ExecutorConfigFile,
@@ -29,6 +54,8 @@ pub struct Executor {
     shared_blockhash: Option<SharedBlockhash>,
     #[allow(dead_code)] // Held to keep Arc alive; TxBuilder has a clone
     marginfi_state: Option<Arc<MarginFiState>>,
+    /// Simulation failure blacklist: routes that fail repeatedly are suppressed
+    sim_blacklist: HashMap<SimBlacklistKey, SimFailEntry>,
 }
 
 impl Executor {
@@ -95,6 +122,7 @@ impl Executor {
             rpc,
             shared_blockhash: None,
             marginfi_state: marginfi_state,
+            sim_blacklist: HashMap::new(),
         })
     }
 
@@ -143,6 +171,19 @@ impl Executor {
             if latest_slot > opp.slot && latest_slot - opp.slot > 2 {
                 debug!("Discarding stale opportunity (slot {} vs latest {})", opp.slot, latest_slot);
                 continue;
+            }
+
+            // Simulation failure blacklist check
+            let bl_key = sim_blacklist_key(&opp);
+            if let Some(entry) = self.sim_blacklist.get(&bl_key) {
+                if entry.count >= SIM_BLACKLIST_THRESHOLD {
+                    if entry.blacklisted_at.elapsed().as_secs() < SIM_BLACKLIST_DURATION_SECS {
+                        debug!("[SIM_BLACKLIST] Suppressed route ({} prior failures)", entry.count);
+                        continue;
+                    }
+                    // Blacklist expired — remove and retry
+                    self.sim_blacklist.remove(&bl_key);
+                }
             }
 
             // Update blockhash: try gRPC first, fallback to RPC
@@ -256,8 +297,21 @@ impl Executor {
                                     opp.slot,
                                     dex_types.join(","),
                                 );
+                                // Track simulation failure for blacklisting
+                                let entry = self.sim_blacklist.entry(bl_key).or_insert(SimFailEntry {
+                                    count: 0,
+                                    blacklisted_at: Instant::now(),
+                                });
+                                entry.count += 1;
+                                if entry.count == SIM_BLACKLIST_THRESHOLD {
+                                    entry.blacklisted_at = Instant::now();
+                                    info!("[SIM_BLACKLIST] Route blacklisted for {}s after {} consecutive failures",
+                                        SIM_BLACKLIST_DURATION_SECS, entry.count);
+                                }
                                 continue;
                             }
+                            // Simulation passed — clear any prior failure count for this route
+                            self.sim_blacklist.remove(&bl_key);
                             let cu_used = sim_result.value.units_consumed.unwrap_or(0);
                             let dex_types: Vec<String> = opp.pool_snapshots.iter()
                                 .map(|s| format!("{:?}", s.dex_type)).collect();

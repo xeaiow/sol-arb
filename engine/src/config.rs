@@ -18,6 +18,8 @@ pub struct EngineConfig {
     pub probe_amount_lamports: u64,
     /// Max profit/input ratio. Opportunities exceeding this are likely bad data.
     pub max_profit_ratio: f64,
+    /// Absolute profit cap (lamports). Opportunities claiming higher are almost certainly quoting bugs.
+    pub max_absolute_profit_lamports: u64,
     /// Enable dynamic staleness check (skip routes with stale pools)
     pub enable_staleness_check: bool,
 }
@@ -36,7 +38,8 @@ impl Default for EngineConfig {
             max_input_lamports: 100_000_000_000,
             ternary_iterations: 10,
             probe_amount_lamports: 1_000_000_000,
-            max_profit_ratio: 0.5,
+            max_profit_ratio: 0.1,
+            max_absolute_profit_lamports: 5_000_000_000, // 5 SOL — no legit arb yields more in competitive markets
             enable_staleness_check: true,
         }
     }
