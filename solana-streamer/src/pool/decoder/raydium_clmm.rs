@@ -110,13 +110,17 @@ pub fn tick_array_pda(pool_id: &Pubkey, start_index: i32) -> Option<Pubkey> {
     Some(pda)
 }
 
-/// Get the 3 tick array start indices needed for quoting: left, current, right.
-pub fn tick_array_start_indices(tick_current: i32, tick_spacing: u16) -> [i32; 3] {
+/// Get the 7 tick array start indices needed for quoting: current ± 3.
+pub fn tick_array_start_indices(tick_current: i32, tick_spacing: u16) -> [i32; 7] {
     let ticks_in_array = tick_spacing as i32 * 60;
     let current_start = tick_array_start_index(tick_current, tick_spacing);
     [
-        current_start - ticks_in_array, // left
-        current_start,                   // current
-        current_start + ticks_in_array, // right
+        current_start - 3 * ticks_in_array,
+        current_start - 2 * ticks_in_array,
+        current_start - ticks_in_array,
+        current_start,
+        current_start + ticks_in_array,
+        current_start + 2 * ticks_in_array,
+        current_start + 3 * ticks_in_array,
     ]
 }
