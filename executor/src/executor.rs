@@ -240,22 +240,28 @@ impl Executor {
                     match self.rpc.simulate_transaction_with_config(tx, sim_config).await {
                         Ok(sim_result) => {
                             if let Some(err) = sim_result.value.err {
+                                let dex_types: Vec<String> = opp.pool_snapshots.iter()
+                                    .map(|s| format!("{:?}", s.dex_type)).collect();
                                 info!(
-                                    "[SIMULATE] FAIL: {} | engine_profit={:.6} SOL | {} hops slot={} → skipped",
+                                    "[SIMULATE] FAIL: {} | engine_profit={:.6} SOL | {} hops slot={} dexes=[{}] → skipped",
                                     err,
                                     opp.expected_profit as f64 / 1e9,
                                     opp.route.hops.len(),
                                     opp.slot,
+                                    dex_types.join(","),
                                 );
                                 continue;
                             }
                             let cu_used = sim_result.value.units_consumed.unwrap_or(0);
+                            let dex_types: Vec<String> = opp.pool_snapshots.iter()
+                                .map(|s| format!("{:?}", s.dex_type)).collect();
                             info!(
-                                "[SIMULATE] PASS: engine_profit={:.6} SOL, CU={} | {} hops slot={} → sending",
+                                "[SIMULATE] PASS: engine_profit={:.6} SOL, CU={} | {} hops slot={} dexes=[{}] → sending",
                                 opp.expected_profit as f64 / 1e9,
                                 cu_used,
                                 opp.route.hops.len(),
                                 opp.slot,
+                                dex_types.join(","),
                             );
                         }
                         Err(e) => {

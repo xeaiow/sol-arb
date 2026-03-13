@@ -398,12 +398,18 @@ fn dlmm_get_amount_out(
         .collect();
     all_bins.sort_by_key(|b| b.bin_id);
 
+    log::trace!(
+        "[DLMM_QUOTE] active_id={} bin_step={} a_to_b={} amount_in={} arrays={} total_bins={} base_fee={:.6} var_fee={:.6}",
+        active_id, bin_step, is_a_to_b, amount_in, bin_arrays.len(), all_bins.len(), base_fee, var_fee,
+    );
+
     // is_a_to_b means X→Y (swap_for_y = true): traverse bins downward from active_id
     // !is_a_to_b means Y→X (swap_for_y = false): traverse bins upward from active_id
     let swap_for_y = is_a_to_b;
 
     let mut remaining = amount_in as f64;
     let mut total_out: f64 = 0.0;
+    let mut bins_consumed = 0u32;
 
     let step_bps = bin_step as f64 / 10000.0;
 
@@ -448,6 +454,7 @@ fn dlmm_get_amount_out(
 
             total_out += out;
             remaining -= consumed;
+            bins_consumed += 1;
         }
     } else {
         // Y→X: price increases, traverse from active_id upward
@@ -488,12 +495,20 @@ fn dlmm_get_amount_out(
 
             total_out += out;
             remaining -= consumed;
+            bins_consumed += 1;
         }
     }
 
     // Apply 0.5% haircut for f64 precision loss (similar to CLMM's 0.3%)
     let out = total_out * 0.995;
-    out.max(0.0) as u64
+    let result = out.max(0.0) as u64;
+
+    log::trace!(
+        "[DLMM_QUOTE] result: in={} out={} bins_consumed={} remaining={:.0} haircut_out={}",
+        amount_in, result, bins_consumed, remaining, result,
+    );
+
+    result
 }
 
 /// Compute dynamic fee rate for a specific bin_id.

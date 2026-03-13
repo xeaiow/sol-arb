@@ -870,9 +870,17 @@ impl TxBuilder {
                 // Append bin_array remaining accounts (extra[1..])
                 let bin_arrays = if extra.len() > 1 { &extra[1..] } else { &[] };
                 if bin_arrays.is_empty() {
-                    log::warn!("DLMM bin_arrays missing for pool {}, skipping hop", pool);
+                    log::warn!("[DLMM_TX] bin_arrays missing for pool {}, skipping hop", pool);
                     return vec![];
                 }
+                log::debug!(
+                    "[DLMM_TX] pool={} oracle={} bin_arrays={} vault_a={} vault_b={} 2022=({},{})",
+                    &pool.to_string()[..8], &oracle.to_string()[..8],
+                    bin_arrays.len(),
+                    vault_a.map(|v| v.to_string()[..8].to_string()).unwrap_or("none".into()),
+                    vault_b.map(|v| v.to_string()[..8].to_string()).unwrap_or("none".into()),
+                    snap.mint_a_is_2022, snap.mint_b_is_2022,
+                );
                 for ba in bin_arrays {
                     metas.push(AccountMeta::new(*ba, false));
                 }

@@ -144,8 +144,13 @@ impl PoolStreamer {
 
         // 4a. Handle DLMM bin array updates
         if let DexEvent::MeteoraDlmmBinArrayAccountEvent(ref ba_event) = event {
+            let known = self.cache.pool_by_tick_array(&ba_event.pubkey).is_some();
             if let Some(ba) = decoder::meteora_dlmm::decode_bin_array(&ba_event.data) {
+                debug!("[DLMM_BA] gRPC update: ba={} index={} bins_with_liq={} slot={} known={}",
+                    ba_event.pubkey, ba.index, ba.bins.len(), ba_event.metadata.slot, known);
                 self.cache.update_bin_array(&ba_event.pubkey, ba, ba_event.metadata.slot);
+            } else {
+                debug!("[DLMM_BA] gRPC decode failed: ba={} data_len={}", ba_event.pubkey, ba_event.data.len());
             }
         }
 
