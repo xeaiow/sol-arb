@@ -61,6 +61,8 @@ pub struct PoolStreamer {
     vault_notify: Arc<Notify>,
     /// Notify: CLMM pools need tick array reload
     tick_reload_notify: Arc<Notify>,
+    /// Counter for vault balance updates (diagnostic)
+    vault_update_count: AtomicU64,
 }
 
 impl PoolStreamer {
@@ -82,6 +84,7 @@ impl PoolStreamer {
             subscription_notify: Arc::new(Notify::new()),
             vault_notify: Arc::new(Notify::new()),
             tick_reload_notify,
+            vault_update_count: AtomicU64::new(0),
         };
 
         (streamer, update_rx)
@@ -261,6 +264,11 @@ impl PoolStreamer {
 
     fn handle_token_account_update(&self, token_account: &Pubkey, balance: u64, slot: u64) {
         if let Some(is_a) = self.cache.is_vault_a(token_account) {
+            let count = self.vault_update_count.fetch_add(1, Ordering::Relaxed) + 1;
+            if count % 1000 == 0 {
+                info!("Vault balance updates received: {} total (latest: {} balance={} slot={})",
+                    count, token_account, balance, slot);
+            }
             self.cache.update_vault_balance(token_account, balance, is_a, slot);
         }
     }
@@ -500,6 +508,7 @@ impl PoolStreamer {
             let pubkeys: Vec<Pubkey> = chunk.iter().map(|v| v.vault).collect();
             match self.rpc.get_multiple_accounts(&pubkeys).await {
                 Ok(accounts) => {
+                    let current_slot = self.latest_blockhash_slot.load(Ordering::Relaxed);
                     for (i, maybe_account) in accounts.iter().enumerate() {
                         if let Some(account) = maybe_account {
                             if account.data.len() >= 72 {
@@ -510,13 +519,13 @@ impl PoolStreamer {
                                     &chunk[i].vault,
                                     balance,
                                     chunk[i].is_vault_a,
-                                    1,
+                                    current_slot,
                                 );
                             }
                         }
                     }
-                    info!("Batch vault fetch: {}/{} succeeded",
-                        accounts.iter().filter(|a| a.is_some()).count(), chunk.len());
+                    info!("Batch vault fetch: {}/{} succeeded (slot={})",
+                        accounts.iter().filter(|a| a.is_some()).count(), chunk.len(), current_slot);
                 }
                 Err(e) => {
                     debug!("Batch vault fetch failed ({}), re-queuing {} vaults", e, chunk.len());

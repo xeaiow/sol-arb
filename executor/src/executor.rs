@@ -209,6 +209,24 @@ impl Executor {
                 continue;
             }
 
+            // TX size check — Solana limit is 1232 bytes
+            {
+                let check_tx = pair.swqos_tx.as_ref().or(pair.jito_tx.as_ref());
+                if let Some(tx) = check_tx {
+                    if let Ok(bytes) = bincode::serialize(tx) {
+                        if bytes.len() > 1232 {
+                            warn!(
+                                "[TX_SIZE] {} bytes > 1232 limit | engine_profit={:.6} SOL | {} hops → skipped",
+                                bytes.len(),
+                                opp.expected_profit as f64 / 1e9,
+                                opp.route.hops.len(),
+                            );
+                            continue;
+                        }
+                    }
+                }
+            }
+
             // Simulate before sending — filter out false opportunities
             {
                 let sim_tx = pair.swqos_tx.as_ref().or(pair.jito_tx.as_ref());

@@ -1,4 +1,5 @@
 use std::collections::HashMap;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Instant;
 use log::{info, debug};
 use rayon::prelude::*;
@@ -224,11 +225,13 @@ impl Scanner {
         let enable_staleness = self.config.enable_staleness_check;
         let graph = &self.graph;
 
+        let stale_skip_count = AtomicU64::new(0);
         let mut probed: Vec<(u32, Route, i64)> = routes.into_par_iter()
             .filter_map(|(idx, route)| {
                 // Staleness check: skip routes with stale pools
                 if enable_staleness {
                     if let Some((_pool_idx, _staleness, _max)) = find_stale_hop(&route, graph, slot) {
+                        stale_skip_count.fetch_add(1, Ordering::Relaxed);
                         return None;
                     }
                 }
@@ -247,6 +250,11 @@ impl Scanner {
                 }
             })
             .collect();
+
+        let stale_skipped = stale_skip_count.load(Ordering::Relaxed);
+        if stale_skipped > 0 {
+            debug!("[STALE] Skipped {} routes (slot {}) in pool {} scan", stale_skipped, slot, pool_index);
+        }
 
         if probed.is_empty() {
             return;
