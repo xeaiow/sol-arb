@@ -1,6 +1,6 @@
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::time::Instant;
+use std::time::{Duration, Instant};
 use log::{info, debug};
 use rayon::prelude::*;
 use solana_sdk::pubkey::Pubkey;
@@ -87,8 +87,8 @@ pub struct Scanner {
     phase: Phase,
     update_rx: mpsc::Receiver<PoolUpdate>,
     opportunity_tx: mpsc::Sender<Opportunity>,
-    /// Dedup: route_key -> (slot, profit) of last emitted opportunity
-    recent_emissions: HashMap<RouteKey, (u64, u64)>,
+    /// Dedup: route_key -> (time, profit) of last emitted opportunity
+    recent_emissions: HashMap<RouteKey, (Instant, u64)>,
 }
 
 impl Scanner {
@@ -387,11 +387,11 @@ impl Scanner {
     fn emit_opportunity(&mut self, route: &Route, slot: u64, amount_in: u64, profit: u64) -> bool {
         let key = route_key(route);
 
-        // Dedup: skip if same route was recently emitted with >= profit
-        if let Some(&(prev_slot, prev_profit)) = self.recent_emissions.get(&key) {
-            if slot <= prev_slot + 1 && profit <= prev_profit + prev_profit / 10 {
-                debug!("Route {:?} dedup: profit={} vs prev={} (slot {} vs {})",
-                    key.0, profit, prev_profit, slot, prev_slot);
+        // Dedup: skip if same route was emitted within 2 seconds with similar profit.
+        // Re-emit only if profit increased >10% (market moved in our favor).
+        if let Some(&(prev_time, prev_profit)) = self.recent_emissions.get(&key) {
+            let elapsed = prev_time.elapsed();
+            if elapsed < Duration::from_secs(2) && profit <= prev_profit + prev_profit / 10 {
                 return false;
             }
         }
@@ -442,7 +442,7 @@ impl Scanner {
         };
 
         if self.opportunity_tx.try_send(opportunity).is_ok() {
-            self.recent_emissions.insert(key, (max_slot, profit));
+            self.recent_emissions.insert(key, (Instant::now(), profit));
             true
         } else {
             debug!("Opportunity channel full, dropping");

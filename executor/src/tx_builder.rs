@@ -819,7 +819,7 @@ impl TxBuilder {
                     AccountMeta::new(self.payer_pubkey, true),              // [8] payer
                     AccountMeta::new_readonly(token_a_prog, false),         // [9] token_a_program
                     AccountMeta::new_readonly(token_b_prog, false),         // [10] token_b_program
-                    AccountMeta::new_readonly(METEORA_DAMM_V2_PROGRAM, false), // [11] referral_token_account (placeholder)
+                    AccountMeta::new(METEORA_DAMM_V2_PROGRAM, false),          // [11] referral_token_account (placeholder, CPI marks writable)
                     AccountMeta::new_readonly(event_authority, false),      // [12] event_authority
                     AccountMeta::new_readonly(METEORA_DAMM_V2_PROGRAM, false), // [13] program
                 ]

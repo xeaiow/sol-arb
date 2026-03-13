@@ -286,7 +286,10 @@ fn swap_pumpfun(accounts: &[AccountView], is_a_to_b: bool, amount_in: u64) -> Pr
 fn swap_pumpswap(accounts: &[AccountView], is_a_to_b: bool, amount_in: u64) -> ProgramResult {
     if !is_a_to_b {
         // Buy: SOL (quote) → token (base), i.e. b→a
-        let buy_accounts = dex_pinocchio_cpi::pump_fun_amm::BuyAccounts {
+        // Use buy_exact_quote_in: "spend amount_in quote, get at least 1 base".
+        // The old `buy` instruction takes base_amount_out (desired output) which
+        // we don't know — passing SOL lamports as base amount causes Overflow (0x1787).
+        let buy_accounts = dex_pinocchio_cpi::pump_fun_amm::BuyExactQuoteInAccounts {
             pool: &accounts[0],
             user: &accounts[1],
             global_config: &accounts[2],
@@ -311,12 +314,12 @@ fn swap_pumpswap(accounts: &[AccountView], is_a_to_b: bool, amount_in: u64) -> P
             fee_config: &accounts[21],
             fee_program: &accounts[22],
         };
-        let args = dex_pinocchio_cpi::pump_fun_amm::BuyArgs {
-            base_amount_out: amount_in,
-            max_quote_amount_in: u64::MAX,
+        let args = dex_pinocchio_cpi::pump_fun_amm::BuyExactQuoteInArgs {
+            spendable_quote_in: amount_in,
+            min_base_amount_out: 1,
             track_volume: [0u8; 32],
         };
-        dex_pinocchio_cpi::pump_fun_amm::buy(&buy_accounts, &args, &[])
+        dex_pinocchio_cpi::pump_fun_amm::buy_exact_quote_in(&buy_accounts, &args, &[])
     } else {
         // Sell: token (base) → SOL (quote), i.e. a→b
         // Off-chain always sends 23 accounts in Buy layout.
