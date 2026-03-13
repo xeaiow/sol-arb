@@ -21,11 +21,11 @@ impl AstralaneSender {
     pub async fn send_transaction(&self, tx: &VersionedTransaction) -> Result<()> {
         let tx_bytes = bincode::serialize(tx)?;
         let tx_base64 = base64::engine::general_purpose::STANDARD.encode(&tx_bytes);
-        log::info!("Astralane tx: {} raw bytes, {} base64 chars, first20={}",
-            tx_bytes.len(), tx_base64.len(), &tx_base64[..20.min(tx_base64.len())]);
+        log::info!("Astralane tx: {} raw bytes, {} b64 chars, body_first40=[{}]",
+            tx_bytes.len(), tx_base64.len(), &tx_base64[..40.min(tx_base64.len())]);
 
         let url = format!(
-            "{}?api-key={}&method=sendTransaction",
+            "{}?api-key={}&method=sendTransaction&mev-protect=true",
             self.endpoint, self.api_key,
         );
 
@@ -40,7 +40,7 @@ impl AstralaneSender {
         if !resp.status().is_success() {
             let status = resp.status();
             let text = resp.text().await.unwrap_or_default();
-            anyhow::bail!("Astralane HTTP {}: {}", status, text);
+            anyhow::bail!("Astralane HTTP {} ({}): {}", status, self.endpoint, text);
         }
 
         log::info!("Astralane sent OK: {}", self.endpoint);

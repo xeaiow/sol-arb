@@ -625,9 +625,9 @@ impl TxBuilder {
                     &[b"user_volume_accumulator", self.payer_pubkey.as_ref()],
                     &PUMPFUN_PROGRAM,
                 );
-                // fee_config PDA of fee program: ["fee_config"]
+                // fee_config PDA of fee program: ["fee_config", program_id]
                 let (fee_config, _) = Pubkey::find_program_address(
-                    &[b"fee_config"],
+                    &[b"fee_config", PUMPFUN_PROGRAM.as_ref()],
                     &PUMPFUN_FEE_PROGRAM,
                 );
                 vec![
@@ -691,9 +691,9 @@ impl TxBuilder {
                     &[b"user_volume_accumulator", self.payer_pubkey.as_ref()],
                     &PUMPSWAP_PROGRAM,
                 );
-                // fee_config PDA
+                // fee_config PDA: ["fee_config", program_id]
                 let (fee_config, _) = Pubkey::find_program_address(
-                    &[b"fee_config"],
+                    &[b"fee_config", PUMPSWAP_PROGRAM.as_ref()],
                     &PUMPSWAP_FEE_PROGRAM,
                 );
                 vec![
@@ -783,8 +783,8 @@ impl TxBuilder {
                     &[b"__event_authority"],
                     &METEORA_DAMM_V2_PROGRAM,
                 );
-                // referral_token_account: use payer's quote ATA as self-referral (0 fees)
-                let referral_token_account = derive_ata_with_program(&self.payer_pubkey, &snap.mint_b, &token_b_prog);
+                // referral_token_account: must match the output mint (fee is taken from output side)
+                let referral_token_account = derive_ata_with_program(&self.payer_pubkey, &output_mint, &output_token_prog);
                 vec![
                     AccountMeta::new_readonly(pool_authority, false),       // [0] pool_authority
                     AccountMeta::new(pool, false),                          // [1] pool
