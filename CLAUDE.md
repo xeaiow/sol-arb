@@ -38,12 +38,27 @@ program/           — Solana 鏈上程式（Anchor）
 - 設定：`priority_fee_lamports = 100000`（0.0001 SOL），在 config.toml 的 flashblock/astralane section
 - `calculate_cu_price()` 基於固定 lamports 和 CU limit 計算 micro-lamports per CU
 
+### Anchor Optional Accounts
+- IDL `optional=true` 的帳戶，用 program_id 作 placeholder 表示缺席（不是派生 PDA）
+- 如果派生不存在的 PDA 會導致 0xbc4 (AccountNotInitialized)
+- Meteora DAMM V2 的 `referral_token_account` 和 DLMM 的 `bitmap_ext`、`host_fee_in` 都是 optional
+
+### pinocchio CPI 規則
+- `invoke_signed_with_slice` 的 `account_views` 和 `instruction.accounts` 必須 **1:1 位置對應**
+- 每個位置的 `address` 必須匹配，否則報 `InvalidArgument`
+- `views.len() < instruction.accounts.len()` → `NotEnoughAccountKeys`（即 "insufficient account keys"）
+- **絕對不可以在 views 中跳過帳戶**，即使是 placeholder
+
 ### Meteora DAMM V2
 - `pool_authority` 是固定全域地址 `HLnpSz9h2S4hiLQ43rnSD9XkcUThA7B8hQMKmDaiTLcC`（來自 IDL），不是 per-pool PDA
+- `referral_token_account` 是 optional，用 DAMM V2 program_id 作 placeholder（readonly）
 
 ### Meteora DLMM
 - Bin-based AMM，離線用 ConstantProduct + vault balance 近似報價
-- `Swap2` 指令需要 bin_arrays 作為 remaining accounts
+- `Swap2` 指令：16 固定帳戶 + remaining bin_arrays
+- `bitmap_ext[1]`、`host_fee_in[9]`、`program[15]` 是 optional accounts，用 DLMM program_id 作 placeholder（表示缺席）
+- **pinocchio CPI 要求 views 和 instruction_accounts 必須 1:1 位置對應**，不可 skip 任何帳戶
+- `remaining_accounts_info`：Borsh-serialized empty Vec（前 4 bytes = 0）
 - `bin_array_bitmap_extension` PDA: `["bitmap", lb_pair]`
 - Fee: `base_factor * bin_step * 10` (units of 1e-9)
 - Bin array PDA seeds: `["bin_array", lb_pair, index.to_le_bytes()]`（index 是 i64）
@@ -70,6 +85,10 @@ program/           — Solana 鏈上程式（Anchor）
 ### Vault Batch Fetch
 - `getMultipleAccounts` RPC 限制：部分節點上限 50（非預設 100）
 - `streamer.rs` 用 `chunks(50)`，失敗的 vault 會 re-queue 重試
+
+### MarginFi Flashloan
+- `destination_token_account`（payer 的 base mint ATA）必須在 borrow 指令前就已初始化
+- `build_create_ata_ixs` 需包含 base mint 的 ATA（不只是中間 token 的 ATA）
 
 ### Token 帳戶
 - SPL Token 和 Token-2022 balance 都在 byte offset 64（u64 LE）
