@@ -955,6 +955,14 @@ impl TxBuilder {
         let mut mints: Vec<(Pubkey, bool)> = Vec::new(); // (mint, is_token_2022)
         let hop_count = opp.route.hops.len();
 
+        // Base mint ATA (needed for flashloan borrow destination)
+        // Idempotent: no-op if already exists
+        let base_mint = opp.route.base_mint;
+        let base_is_2022 = opp.pool_snapshots.first()
+            .map(|s| if s.is_a_to_b { s.mint_a_is_2022 } else { s.mint_b_is_2022 })
+            .unwrap_or(false);
+        mints.push((base_mint, base_is_2022));
+
         // Intermediate mints (between hops)
         for i in 1..hop_count {
             let prev = &opp.pool_snapshots[i - 1];
