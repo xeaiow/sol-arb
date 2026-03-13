@@ -807,8 +807,8 @@ impl TxBuilder {
                     &[b"__event_authority"],
                     &METEORA_DAMM_V2_PROGRAM,
                 );
-                // referral_token_account: must match the output mint (fee is taken from output side)
-                let referral_token_account = derive_ata_with_program(&self.payer_pubkey, &output_mint, &output_token_prog);
+                // referral_token_account is optional (IDL: optional=true).
+                // Use DAMM V2 program_id as placeholder (matching reference impl).
                 vec![
                     AccountMeta::new_readonly(pool_authority, false),       // [0] pool_authority
                     AccountMeta::new(pool, false),                          // [1] pool
@@ -821,7 +821,7 @@ impl TxBuilder {
                     AccountMeta::new(self.payer_pubkey, true),              // [8] payer
                     AccountMeta::new_readonly(token_a_prog, false),         // [9] token_a_program
                     AccountMeta::new_readonly(token_b_prog, false),         // [10] token_b_program
-                    AccountMeta::new(referral_token_account, false),        // [11] referral_token_account
+                    AccountMeta::new_readonly(METEORA_DAMM_V2_PROGRAM, false), // [11] referral_token_account (placeholder)
                     AccountMeta::new_readonly(event_authority, false),      // [12] event_authority
                     AccountMeta::new_readonly(METEORA_DAMM_V2_PROGRAM, false), // [13] program
                 ]
