@@ -271,6 +271,12 @@ impl PoolStreamer {
             self.apply_pumpswap_fee(&mut pool_state).await;
         }
 
+        // Detect Token-2022 mints for DEXes that don't embed token program in pool state.
+        // CPMM and DAMM V2 already detect this from pool account data.
+        if !matches!(pool_state.dex_type, DexType::RaydiumCpmm | DexType::MeteoraDammV2) {
+            self.detect_token_2022(&mut pool_state).await;
+        }
+
         // Insert pool immediately (reserve may be 0).
         // Engine's reserve transition detection will build routes once balances arrive.
         self.cache.insert(pool_state.clone());
@@ -448,6 +454,35 @@ impl PoolStreamer {
         } = pool_state.math {
             *fee_numerator = fees.total_fee_bps;
             *fee_denominator = 10000;
+        }
+    }
+
+    /// Detect Token-2022 mints by checking mint account owner.
+    /// Mint accounts owned by TokenzQdBNbLqP5VEhdkAS6EPFLC1PHnBqCXEpPxuEb are Token-2022.
+    async fn detect_token_2022(&self, pool_state: &mut PoolState) {
+        const TOKEN_2022_PROGRAM_ID: Pubkey =
+            solana_sdk::pubkey!("TokenzQdBNbLqP5VEhdkAS6EPFLC1PHnBqCXEpPxuEb");
+
+        let mints = vec![pool_state.mint_a, pool_state.mint_b];
+        match self.rpc.get_multiple_accounts(&mints).await {
+            Ok(accounts) => {
+                if let Some(Some(acct)) = accounts.first() {
+                    pool_state.mint_a_is_2022 = acct.owner == TOKEN_2022_PROGRAM_ID;
+                }
+                if let Some(Some(acct)) = accounts.get(1) {
+                    pool_state.mint_b_is_2022 = acct.owner == TOKEN_2022_PROGRAM_ID;
+                }
+                if pool_state.mint_a_is_2022 || pool_state.mint_b_is_2022 {
+                    info!(
+                        "Token-2022 detected: {} {:?} mint_a_2022={} mint_b_2022={}",
+                        pool_state.address, pool_state.dex_type,
+                        pool_state.mint_a_is_2022, pool_state.mint_b_is_2022,
+                    );
+                }
+            }
+            Err(e) => {
+                debug!("Token-2022 detection failed for {}: {}", pool_state.address, e);
+            }
         }
     }
 

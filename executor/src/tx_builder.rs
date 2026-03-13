@@ -842,8 +842,8 @@ impl TxBuilder {
                     &[b"bitmap", pool.as_ref()],
                     &METEORA_DLMM_PROGRAM,
                 );
-                // host_fee_in: pass system program as placeholder (no host fee)
-                let host_fee_in = SYSTEM_PROGRAM_ID;
+                // host_fee_in: use user_token_in as placeholder (DLMM skips if no host)
+                let host_fee_in = user_input_ata;
                 // event_authority PDA: ["__event_authority"]
                 let (event_authority, _) = Pubkey::find_program_address(
                     &[b"__event_authority"],
