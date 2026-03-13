@@ -8,7 +8,7 @@ use tokio::sync::mpsc;
 use solana_streamer_sdk::pool::state::{DexType, PoolMath, PoolUpdate};
 use solana_streamer_sdk::pool::decoder::raydium_clmm;
 
-use crate::config::EngineConfig;
+use crate::config::{EngineConfig, WSOL_MINT};
 use crate::graph::{PoolEntry, TokenGraph};
 use crate::opportunity::{Opportunity, PoolSnapshot, Route};
 use crate::optimizer;
@@ -29,6 +29,51 @@ fn route_key(route: &Route) -> RouteKey {
         pools[i] = hop.pool_index;
     }
     (pools, route.hops.len() as u8)
+}
+
+/// Calculate max allowed stale slots based on pool reserves (SOL equivalent).
+/// Large pools tolerate more staleness; small pools need fresh data.
+fn max_stale_slots(pool: &PoolEntry) -> u64 {
+    let sol_reserve = match &pool.math {
+        PoolMath::ConstantProduct { reserve_a, reserve_b, .. } => {
+            if pool.mint_a == WSOL_MINT {
+                *reserve_a
+            } else if pool.mint_b == WSOL_MINT {
+                *reserve_b
+            } else {
+                (*reserve_a).max(*reserve_b)
+            }
+        }
+        PoolMath::BondingCurve { virtual_sol_reserves, .. } => *virtual_sol_reserves,
+        PoolMath::Concentrated { liquidity, .. } => {
+            (*liquidity / 1_000_000) as u64
+        }
+    };
+
+    let sol = sol_reserve as f64 / 1e9;
+    if sol > 1000.0 {
+        5
+    } else if sol > 100.0 {
+        3
+    } else {
+        1
+    }
+}
+
+/// Check if any pool in the route is too stale relative to current_slot.
+fn find_stale_hop(route: &Route, graph: &TokenGraph, current_slot: u64) -> Option<(u32, u64, u64)> {
+    for hop in &route.hops {
+        let pool = &graph.pools[hop.pool_index as usize];
+        if pool.last_updated_slot == 0 {
+            continue;
+        }
+        let staleness = current_slot.saturating_sub(pool.last_updated_slot);
+        let max = max_stale_slots(pool);
+        if staleness > max {
+            return Some((hop.pool_index, staleness, max));
+        }
+    }
+    None
 }
 
 /// The main scanner that ties everything together
@@ -176,10 +221,18 @@ impl Scanner {
         // Phase 1: parallel probe — filter and rank routes by probe profit
         let probe_amount = self.config.probe_amount_lamports;
         let min_reserve = self.config.min_reserve_lamports;
+        let enable_staleness = self.config.enable_staleness_check;
         let graph = &self.graph;
 
         let mut probed: Vec<(u32, Route, i64)> = routes.into_par_iter()
             .filter_map(|(idx, route)| {
+                // Staleness check: skip routes with stale pools
+                if enable_staleness {
+                    if let Some((_pool_idx, _staleness, _max)) = find_stale_hop(&route, graph, slot) {
+                        return None;
+                    }
+                }
+
                 // Quick reserve check
                 for hop in &route.hops {
                     if !graph.pool_has_min_reserve(hop.pool_index, min_reserve) {

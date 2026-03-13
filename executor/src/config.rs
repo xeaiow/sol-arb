@@ -33,6 +33,7 @@ pub struct EngineConfigFile {
     pub probe_amount_sol: Option<f64>,
     pub max_profit_ratio: Option<f64>,
     pub base_mints: Option<Vec<String>>,
+    pub enable_staleness_check: Option<bool>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -113,6 +114,7 @@ impl ExecutorConfigFile {
             ternary_iterations: ec.ternary_iterations.unwrap_or(defaults.ternary_iterations),
             probe_amount_lamports: ec.probe_amount_sol.map(sol_to_lamports).unwrap_or(defaults.probe_amount_lamports),
             max_profit_ratio: ec.max_profit_ratio.unwrap_or(defaults.max_profit_ratio),
+            enable_staleness_check: ec.enable_staleness_check.unwrap_or(defaults.enable_staleness_check),
         }
     }
 }
