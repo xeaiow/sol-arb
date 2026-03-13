@@ -827,27 +827,28 @@ impl TxBuilder {
                 ]
             }
 
-            // Meteora DLMM: 16 fixed accounts + remaining bin_arrays
-            // swap.rs: [lb_pair, bin_array_bitmap_extension, reserve_x, reserve_y,
+            // Meteora DLMM: swap2 — 16 fixed accounts + remaining bin_arrays
+            // Layout: [lb_pair, bitmap_ext(placeholder), reserve_x, reserve_y,
             //  user_token_in, user_token_out, token_x_mint, token_y_mint, oracle,
-            //  host_fee_in, user, token_x_program, token_y_program, memo_program,
-            //  event_authority, program, ...bin_arrays]
+            //  host_fee_in(placeholder), user, token_x_program, token_y_program,
+            //  memo_program, event_authority, program(placeholder), ...bin_arrays]
             // extra[0]=oracle, extra[1..]=bin_array PDAs (if available)
+            // bitmap_ext[1], host_fee_in[9], program[15] = DLMM program_id (optional absent)
             DexType::MeteoraDlmm => {
                 let oracle = extra.first().copied().unwrap_or_default();
                 let token_x_prog = if snap.mint_a_is_2022 { TOKEN_2022_PROGRAM_ID } else { SPL_TOKEN_PROGRAM_ID };
                 let token_y_prog = if snap.mint_b_is_2022 { TOKEN_2022_PROGRAM_ID } else { SPL_TOKEN_PROGRAM_ID };
-                // bin_array_bitmap_extension and host_fee_in are optional accounts.
-                // DLMM program checks if they're initialized — passing an uninitialized PDA
-                // causes 0xbc4 (AccountNotInitialized). Use DLMM program_id as placeholder
-                // in AccountMeta (the account_infos skip them, matching reference impl).
                 let (event_authority, _) = Pubkey::find_program_address(
                     &[b"__event_authority"],
                     &METEORA_DLMM_PROGRAM,
                 );
+                // 16 fixed accounts for DLMM swap2.
+                // bitmap_ext[1], host_fee_in[9], program[15] use DLMM program_id as placeholder
+                // (optional accounts — DLMM treats program_id as "absent").
+                // These must be in the hop accounts so pinocchio CPI views match 1:1.
                 let mut metas = vec![
                     AccountMeta::new(pool, false),                              // [0] lb_pair
-                    AccountMeta::new_readonly(METEORA_DLMM_PROGRAM, false),     // [1] bin_array_bitmap_extension (placeholder)
+                    AccountMeta::new_readonly(METEORA_DLMM_PROGRAM, false),     // [1] bitmap_ext (placeholder)
                     AccountMeta::new(vault_a.unwrap_or_default(), false),        // [2] reserve_x
                     AccountMeta::new(vault_b.unwrap_or_default(), false),        // [3] reserve_y
                     AccountMeta::new(user_input_ata, false),                     // [4] user_token_in
@@ -856,12 +857,12 @@ impl TxBuilder {
                     AccountMeta::new_readonly(snap.mint_b, false),               // [7] token_y_mint
                     AccountMeta::new(oracle, false),                             // [8] oracle
                     AccountMeta::new_readonly(METEORA_DLMM_PROGRAM, false),     // [9] host_fee_in (placeholder)
-                    AccountMeta::new_readonly(self.payer_pubkey, true),           // [10] user
-                    AccountMeta::new_readonly(token_x_prog, false),              // [11] token_x_program
-                    AccountMeta::new_readonly(token_y_prog, false),              // [12] token_y_program
-                    AccountMeta::new_readonly(SPL_MEMO_PROGRAM_ID, false),        // [13] memo_program
-                    AccountMeta::new_readonly(event_authority, false),            // [14] event_authority
-                    AccountMeta::new_readonly(METEORA_DLMM_PROGRAM, false),      // [15] program
+                    AccountMeta::new_readonly(self.payer_pubkey, true),          // [10] user
+                    AccountMeta::new_readonly(token_x_prog, false),             // [11] token_x_program
+                    AccountMeta::new_readonly(token_y_prog, false),             // [12] token_y_program
+                    AccountMeta::new_readonly(SPL_MEMO_PROGRAM_ID, false),       // [13] memo_program
+                    AccountMeta::new_readonly(event_authority, false),           // [14] event_authority
+                    AccountMeta::new_readonly(METEORA_DLMM_PROGRAM, false),     // [15] program
                 ];
                 // Append bin_array remaining accounts (extra[1..])
                 let bin_arrays = if extra.len() > 1 { &extra[1..] } else { &[] };
