@@ -100,7 +100,8 @@ pub const ORCA_WHIRLPOOL_ACCOUNT_MIN_SIZE: usize = 653;
 pub const ORCA_WHIRLPOOL_TICK_ARRAY_DISCRIMINATOR: &[u8] = &[69, 97, 189, 190, 110, 7, 169, 12];
 
 /// Minimum TickArray account data size (8 disc + 4 start_tick_index + 88 ticks * 88 bytes + 32 whirlpool)
-pub const ORCA_WHIRLPOOL_TICK_ARRAY_ACCOUNT_MIN_SIZE: usize = 10000;
+/// 8 disc + 4 start_tick_index + 88*113 ticks + 32 whirlpool = 9988
+pub const ORCA_WHIRLPOOL_TICK_ARRAY_ACCOUNT_MIN_SIZE: usize = 9988;
 
 /// Number of ticks per tick array
 pub const TICK_ARRAY_SIZE: usize = 88;

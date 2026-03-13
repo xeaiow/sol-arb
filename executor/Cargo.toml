@@ -37,5 +37,9 @@ path = "src/bin/verify_damm_v2.rs"
 name = "verify_dlmm"
 path = "src/bin/verify_dlmm.rs"
 
+[[bin]]
+name = "verify_whirlpool"
+path = "src/bin/verify_whirlpool.rs"
+
 [build-dependencies]
 tonic-build = "0.12"

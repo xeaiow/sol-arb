@@ -17,47 +17,56 @@
 - **驗證**: `verify_dlmm.rs` 確認修正後 bin_step/active_id 讀取正確
 - **注意**: gRPC parser 用 sequential offset 讀取，一直是正確的。只有 `decode_bytes`（RPC 批量載入）有問題
 
-## 進行中
+### 3. Orca Whirlpool ✅
+- **問題**: tick array 中 tick index 計算錯誤 — `decode_tick_array()` 和 `tick_array_from_event()` 用 `start_tick_index + i`，應為 `start_tick_index + i * tick_spacing`
+- **根因**: Orca 在 tick array 中每個 tick 間隔 `tick_spacing`，但 decoder 把它們當連續的（間隔 1）
+- **影響**: tick_spacing=64 時，tick indices 壓縮了 64 倍，導致 sqrt_price 計算偏差巨大
+  - 大額交易（500 SOL）報價偏差 **-9.9%**（BUGGY: 380,993B vs FIXED: 422,866B）
+  - BUGGY nearest tick price: 868（真實: 1433，偏差 -39%）
+  - 小額交易不受影響（不需要 cross tick）
+- **修正**:
+  - `decode_tick_array(data)` → `decode_tick_array(data, tick_spacing)`，index 改為 `start + i * tick_spacing`
+  - `tick_array_from_event(event)` → `tick_array_from_event(event, tick_spacing)`，同上
+  - tick array minimum size: 10000 → 9988（8 disc + 4 start + 88×113 ticks + 32 whirlpool = 9988）
+  - 更新 streamer.rs 3 個呼叫點傳入 tick_spacing
+- **Raydium CLMM 不受影響**: 它直接從 on-chain TickState.tick 讀 absolute index，不需要乘 tick_spacing
+- **驗證**: `verify_whirlpool.rs`（Phase 1: buggy vs fixed 比對 + Phase 2: production decoder pipeline 驗證）
+  - ✓ Production pipeline 報價與 fixed local 報價 100% 一致
+  - ✓ All tick indices are multiples of tick_spacing
+  - ✓ Nearest ticks correctly bracket real price
+- **影響檔案**: decoder/orca_whirlpool.rs, streamer.rs, events.rs (min size constant)
 
-### 3. Orca Whirlpool ⚠️ 發現潛在 bug，尚未修正
-- **疑似問題**: tick array 中 tick index 計算可能錯誤
-  - `decode_tick_array()` 用 `start_tick_index + i` 計算 tick index
-  - 但 Orca Whirlpool 每個 tick 間隔 `tick_spacing`，應該是 `start_tick_index + i * tick_spacing`
-  - 如果 `tick_spacing=64`，第 5 個 tick 的 index 應為 `start + 320`，不是 `start + 5`
-  - 需要確認 Raydium CLMM 是否也有同樣問題（兩者共用 `PoolMath::Concentrated`）
-- **待做**:
-  1. 確認 Raydium CLMM 的 tick array 是否用不同 layout（Raydium 每 array 60 ticks，每 tick 也是按 tick_spacing 間隔嗎？）
-  2. 寫 `verify_whirlpool.rs` 對比鏈上報價
-  3. 如果 tick index 計算確實錯誤，修正 `decode_tick_array` 和 `tick_array_from_event`
-
-## 未開始
-
-### 4. Raydium CLMM — 待驗證
+### 4. Raydium CLMM ✅ 驗證完成（無需修改）
 - 共用 `PoolMath::Concentrated` 和 `clmm_get_amount_out()` tick traversal
-- 需確認 tick index 計算是否正確（同 Orca 問題）
-- 載入 7 個 tick arrays（±3），大額交易可能超出範圍
-- 有 0.3% haircut
+- **不受 Orca bug 影響**: Raydium 的 TickState struct 直接含 absolute tick index（`t.tick`），decoder 只是複製
+- 載入 7 個 tick arrays（±3），有 `clmm_cap_input()` 保護大額交易
+- 0.3% haircut 合理
 
-### 5. Raydium AMM V4 — 可能正確
-- 標準 ConstantProduct，vault balance = reserves
-- 需快速驗證 fee 是否正確讀取
+### 5. Raydium AMM V4 ✅ 驗證完成（無需修改）
+- 標準 ConstantProduct，fee 從 pool account 的 Fees struct 讀取
+- Reserves 從 vault balance gRPC 更新，cache.rs update_math() 正確保留
+- Fee 是 static（baked into pool account），不需要外部 fetch
 
-### 6. Raydium CPMM — 可能正確
-- 標準 ConstantProduct，fee 從 AmmConfig 讀取
-- 需確認 fee 讀取流程
+### 6. Raydium CPMM ✅ 驗證完成（無需修改）
+- 標準 ConstantProduct，fee 從 AmmConfig 外部 fetch（fetch_cpmm_fee）
+- Decoder hardcodes 25/10000 預設值，streamer 覆蓋為正確值
+- cache.rs update_math() 保留 fetched fee，不被 decoder 預設值覆蓋
 
-### 7. PumpSwap — 已修過，應正確
-- 標準 ConstantProduct，fee 從 GlobalConfig 讀取
-- 之前已修過 buy/sell 帳戶佈局問題
+### 7. PumpSwap ✅ 驗證完成（無需修改）
+- 標準 ConstantProduct，fee 從 GlobalConfig 外部 fetch（apply_pumpswap_fee）
+- buy/sell 帳戶佈局已修正
+- Fee = lp_fee_basis_points + protocol_fee_basis_points
 
-### 8. PumpFun — 可能正確
-- BondingCurve with virtual reserves + 1% fee + real_cap
+### 8. PumpFun ✅ 驗證完成（無需修改）
+- BondingCurve with virtual reserves + 1% hardcoded fee + real_cap
+- Fee 不可設定（protocol 固定 1%）
 
-### 9. BonkSwap — 可能正確
-- 標準 ConstantProduct，reserves 直接從 pool account 讀取
+### 9. BonkSwap ✅ 驗證完成（無需修改）
+- 標準 ConstantProduct，virtual reserves 直接從 pool account 讀取
+- 1% hardcoded fee
 
 ## 其他待修項目
 
-- **config.toml `max_profit_ratio = 50`**（5000%）太寬鬆，應改回接近 `0.1`（10%），這允許大量不合理的「假機會」通過
-- **DLMM 0.5% haircut** 可能過大，CLMM 用 0.3%，需評估是否下調
-- **DLMM `max_stale_slots` 回傳 0** — scanner.rs 中 DLMM 的 sol_reserve 估算回傳 0，導致 staleness 門檻過嚴（只容忍 1 slot）
+- **config.toml `max_profit_ratio = 50`**（5000%）太寬鬆，應改回接近 `0.5`（50%），過濾明顯假機會但保留合理空間
+- **DLMM 0.5% haircut** — CLMM 和 DAMM V2 都用 0.3%，DLMM 用 0.5% 可能偏高。但 DLMM 是 bin-based 近似報價，精度損失可能比 tick-based CLMM 大。建議用實際交易數據評估後再決定
+- **DLMM `max_stale_slots` 回傳 0** — scanner.rs 中 DLMM 的 sol_reserve 估算回傳 0，導致 staleness 門檻過嚴（只容忍 1 slot）。需從 vault balance 或 bin liquidity 估算 sol_reserve

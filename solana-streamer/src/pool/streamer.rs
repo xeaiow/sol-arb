@@ -162,7 +162,14 @@ impl PoolStreamer {
 
         // 4b. Handle Orca Whirlpool tick array updates
         if let DexEvent::OrcaWhirlpoolTickArrayAccountEvent(ref ta_event) = event {
-            let ta = decoder::orca_whirlpool::tick_array_from_event(ta_event);
+            // Need tick_spacing from the pool to correctly compute absolute tick indices
+            let tick_spacing = self.cache.get(&ta_event.whirlpool)
+                .and_then(|p| match p.math {
+                    PoolMath::Concentrated { tick_spacing, .. } => Some(tick_spacing),
+                    _ => None,
+                })
+                .unwrap_or(1); // fallback: spacing=1 preserves old behavior if pool not cached yet
+            let ta = decoder::orca_whirlpool::tick_array_from_event(ta_event, tick_spacing);
             self.cache.update_tick_array(&ta_event.pubkey, ta, ta_event.metadata.slot);
         }
 
@@ -413,7 +420,7 @@ impl PoolStreamer {
             if let Some(pda) = decoder::orca_whirlpool::tick_array_pda(pool_address, start_index) {
                 match self.rpc.get_account_data(&pda).await {
                     Ok(ta_data) => {
-                        if let Some(ta) = decoder::orca_whirlpool::decode_tick_array(&ta_data) {
+                        if let Some(ta) = decoder::orca_whirlpool::decode_tick_array(&ta_data, tick_spacing) {
                             tick_arrays.push(ta);
                             self.cache.register_tick_array(pda, *pool_address);
                             pending.push(pda.to_string());
@@ -676,7 +683,7 @@ impl PoolStreamer {
                         pending.push(pda.to_string());
                         match self.rpc.get_account_data(&pda).await {
                             Ok(ta_data) => {
-                                if let Some(ta) = decoder::orca_whirlpool::decode_tick_array(&ta_data) {
+                                if let Some(ta) = decoder::orca_whirlpool::decode_tick_array(&ta_data, req.tick_spacing) {
                                     new_tick_arrays.push(ta);
                                 }
                             }

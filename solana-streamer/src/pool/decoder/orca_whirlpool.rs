@@ -125,17 +125,17 @@ fn from_whirlpool_data(
 }
 
 /// Convert an OrcaWhirlpoolTickArrayAccountEvent to our TickArray.
-pub fn tick_array_from_event(event: &OrcaWhirlpoolTickArrayAccountEvent) -> TickArray {
+///
+/// Each tick in the array is spaced `tick_spacing` apart, so the absolute
+/// tick index for slot `i` is `start_tick_index + i * tick_spacing`.
+pub fn tick_array_from_event(event: &OrcaWhirlpoolTickArrayAccountEvent, tick_spacing: u16) -> TickArray {
     let ticks: Vec<Tick> = event
         .ticks
         .iter()
         .enumerate()
         .filter(|(_, t)| t.liquidity_gross > 0)
         .map(|(i, t)| Tick {
-            // Orca tick index = start_tick_index + i * tick_spacing
-            // But we store the absolute tick index. tick_spacing is applied
-            // by the caller when computing start indices.
-            index: event.start_tick_index + i as i32,
+            index: event.start_tick_index + i as i32 * tick_spacing as i32,
             liquidity_net: t.liquidity_net,
         })
         .collect();
@@ -151,8 +151,8 @@ pub fn tick_array_from_event(event: &OrcaWhirlpoolTickArrayAccountEvent) -> Tick
 ///   start_tick_index: i32          offset 8
 ///   ticks: [Tick; 88]              offset 12 (each tick = 113 bytes)
 ///   whirlpool: Pubkey (32)         offset 12 + 88*113 = 9956
-pub fn decode_tick_array(data: &[u8]) -> Option<TickArray> {
-    if data.len() < 10000 {
+pub fn decode_tick_array(data: &[u8], tick_spacing: u16) -> Option<TickArray> {
+    if data.len() < 9988 {
         return None;
     }
 
@@ -175,7 +175,7 @@ pub fn decode_tick_array(data: &[u8]) -> Option<TickArray> {
 
         if initialized && liquidity_gross > 0 {
             ticks.push(Tick {
-                index: start_tick_index + i as i32,
+                index: start_tick_index + i as i32 * tick_spacing as i32,
                 liquidity_net,
             });
         }
