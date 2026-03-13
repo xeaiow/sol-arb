@@ -41,13 +41,28 @@ impl PoolStateCache {
     }
 
     /// Insert a pool, register its vault mappings, and emit initial PoolUpdate.
-    pub fn insert(&self, pool: PoolState) {
+    pub fn insert(&self, mut pool: PoolState) {
         let address = pool.address;
         if let Some(vault) = pool.vault_a {
             self.vault_to_pool.insert(vault, address);
         }
         if let Some(vault) = pool.vault_b {
             self.vault_to_pool.insert(vault, address);
+        }
+
+        // Compute initial CLMM limits (streamer sets tick_arrays + fee_rate before insert,
+        // but doesn't compute limits — they default to 0)
+        if let PoolMath::Concentrated {
+            sqrt_price_x64, liquidity, tick_current, fee_rate, ref tick_arrays,
+            ref mut limit_in_a, ref mut limit_in_b, ..
+        } = pool.math {
+            if !tick_arrays.is_empty() {
+                let (la, lb) = super::state::compute_clmm_limits_with_fee(
+                    sqrt_price_x64, liquidity, tick_current, tick_arrays, fee_rate,
+                );
+                *limit_in_a = la;
+                *limit_in_b = lb;
+            }
         }
 
         // Emit initial PoolUpdate so Engine knows about this pool
@@ -115,8 +130,8 @@ impl PoolStateCache {
                 }
 
                 let fee_rate = if *new_fee != 0 { *new_fee } else { *existing_fee };
-                let (limit_a, limit_b) = super::state::compute_clmm_limits(
-                    *sqrt_price_x64, *liquidity, *tick_current, &tick_arrays,
+                let (limit_a, limit_b) = super::state::compute_clmm_limits_with_fee(
+                    *sqrt_price_x64, *liquidity, *tick_current, &tick_arrays, fee_rate,
                 );
                 PoolMath::Concentrated {
                     sqrt_price_x64: *sqrt_price_x64,
@@ -298,11 +313,11 @@ impl PoolStateCache {
             }
             // Recompute limits after modifying tick arrays
             if let PoolMath::Concentrated {
-                sqrt_price_x64, liquidity, tick_current, ref tick_arrays,
+                sqrt_price_x64, liquidity, tick_current, fee_rate, ref tick_arrays,
                 ref mut limit_in_a, ref mut limit_in_b, ..
             } = pool.math {
-                let (la, lb) = super::state::compute_clmm_limits(
-                    sqrt_price_x64, liquidity, tick_current, tick_arrays,
+                let (la, lb) = super::state::compute_clmm_limits_with_fee(
+                    sqrt_price_x64, liquidity, tick_current, tick_arrays, fee_rate,
                 );
                 *limit_in_a = la;
                 *limit_in_b = lb;
@@ -343,11 +358,11 @@ impl PoolStateCache {
             }
             // Recompute limits after replacing tick arrays
             if let PoolMath::Concentrated {
-                sqrt_price_x64, liquidity, tick_current, ref tick_arrays,
+                sqrt_price_x64, liquidity, tick_current, fee_rate, ref tick_arrays,
                 ref mut limit_in_a, ref mut limit_in_b, ..
             } = pool.math {
-                let (la, lb) = super::state::compute_clmm_limits(
-                    sqrt_price_x64, liquidity, tick_current, tick_arrays,
+                let (la, lb) = super::state::compute_clmm_limits_with_fee(
+                    sqrt_price_x64, liquidity, tick_current, tick_arrays, fee_rate,
                 );
                 *limit_in_a = la;
                 *limit_in_b = lb;
