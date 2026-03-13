@@ -63,6 +63,8 @@ pub struct PoolStreamer {
     tick_reload_notify: Arc<Notify>,
     /// Counter for vault balance updates (diagnostic)
     vault_update_count: AtomicU64,
+    /// Counter for ALL token account events received (diagnostic)
+    token_event_count: AtomicU64,
 }
 
 impl PoolStreamer {
@@ -85,6 +87,7 @@ impl PoolStreamer {
             vault_notify: Arc::new(Notify::new()),
             tick_reload_notify,
             vault_update_count: AtomicU64::new(0),
+            token_event_count: AtomicU64::new(0),
         };
 
         (streamer, update_rx)
@@ -121,11 +124,21 @@ impl PoolStreamer {
         // 3. Handle vault token account balance updates
         if let DexEvent::TokenAccountEvent(ref token_event) = event {
             if let Some(balance) = token_event.amount {
-                self.handle_token_account_update(
-                    &token_event.pubkey,
-                    balance,
-                    token_event.metadata.slot,
-                );
+                // Log all token account events to diagnose gRPC vault update delivery
+                let known = self.cache.is_vault_a(&token_event.pubkey).is_some();
+                if known {
+                    self.handle_token_account_update(
+                        &token_event.pubkey,
+                        balance,
+                        token_event.metadata.slot,
+                    );
+                }
+                // Count ALL token account events (whether known vault or not)
+                let total = self.token_event_count.fetch_add(1, Ordering::Relaxed) + 1;
+                if total <= 5 || total % 5000 == 0 {
+                    info!("TokenAccountEvent #{}: pubkey={} balance={} slot={} known_vault={}",
+                        total, token_event.pubkey, balance, token_event.metadata.slot, known);
+                }
             }
         }
 
@@ -224,8 +237,9 @@ impl PoolStreamer {
         self.subscription_notify.notify_one();
 
         info!(
-            "Pool registered: {} {:?} ({} / {})",
-            pool_state.address, pool_state.dex_type, pool_state.mint_a, pool_state.mint_b
+            "Pool registered: {} {:?} ({} / {}) [vaults_tracked: {}]",
+            pool_state.address, pool_state.dex_type, pool_state.mint_a, pool_state.mint_b,
+            self.cache.vault_count(),
         );
 
         // For CLMM pools: fetch tick arrays and AmmConfig fee_rate (blocking, needed before insert)

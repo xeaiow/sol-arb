@@ -79,6 +79,11 @@ impl PoolStateCache {
         self.pools.get(address)
     }
 
+    /// Number of vault addresses tracked in the reverse index.
+    pub fn vault_count(&self) -> usize {
+        self.vault_to_pool.len()
+    }
+
     /// Look up a pool address by vault address.
     pub fn pool_by_vault(&self, vault: &Pubkey) -> Option<Pubkey> {
         self.vault_to_pool.get(vault).map(|r| *r.value())
