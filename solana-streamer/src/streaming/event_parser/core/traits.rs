@@ -87,6 +87,7 @@ pub enum DexEvent {
     // Meteora DLMM events
     MeteoraDlmmSwap2Event(MeteoraDlmmSwap2Event),
     MeteoraDlmmLbPairAccountEvent(MeteoraDlmmLbPairAccountEvent),
+    MeteoraDlmmBinArrayAccountEvent(MeteoraDlmmBinArrayAccountEvent),
 
     // Orca Whirlpool events
     OrcaWhirlpoolSwapV2Event(OrcaWhirlpoolSwapV2Event),
@@ -156,6 +157,7 @@ impl DexEvent {
             DexEvent::MeteoraDammV2PoolStateAccountEvent(e) => &e.metadata,
             DexEvent::MeteoraDlmmSwap2Event(e) => &e.metadata,
             DexEvent::MeteoraDlmmLbPairAccountEvent(e) => &e.metadata,
+            DexEvent::MeteoraDlmmBinArrayAccountEvent(e) => &e.metadata,
             DexEvent::OrcaWhirlpoolSwapV2Event(e) => &e.metadata,
             DexEvent::OrcaWhirlpoolAccountEvent(e) => &e.metadata,
             DexEvent::OrcaWhirlpoolTickArrayAccountEvent(e) => &e.metadata,
@@ -221,6 +223,7 @@ impl DexEvent {
             DexEvent::MeteoraDammV2PoolStateAccountEvent(e) => &mut e.metadata,
             DexEvent::MeteoraDlmmSwap2Event(e) => &mut e.metadata,
             DexEvent::MeteoraDlmmLbPairAccountEvent(e) => &mut e.metadata,
+            DexEvent::MeteoraDlmmBinArrayAccountEvent(e) => &mut e.metadata,
             DexEvent::OrcaWhirlpoolSwapV2Event(e) => &mut e.metadata,
             DexEvent::OrcaWhirlpoolAccountEvent(e) => &mut e.metadata,
             DexEvent::OrcaWhirlpoolTickArrayAccountEvent(e) => &mut e.metadata,

@@ -2,13 +2,19 @@ use std::sync::Arc;
 use dashmap::DashMap;
 use solana_sdk::pubkey::Pubkey;
 use tokio::sync::mpsc;
-use super::state::{PoolMath, PoolState, PoolUpdate, TickArray};
+use super::state::{DlmmBinArray, PoolMath, PoolState, PoolUpdate, TickArray};
 
 /// Request to reload tick arrays for a CLMM pool whose tick moved out of range.
 pub struct TickArrayReloadRequest {
     pub pool_address: Pubkey,
     pub tick_current: i32,
     pub tick_spacing: u16,
+}
+
+/// Request to reload bin arrays for a DLMM pool whose active_id changed.
+pub struct BinArrayReloadRequest {
+    pub pool_address: Pubkey,
+    pub active_id: i32,
 }
 
 /// Thread-safe pool state cache with vault reverse index.
@@ -23,6 +29,8 @@ pub struct PoolStateCache {
     update_tx: mpsc::Sender<PoolUpdate>,
     /// Queue of CLMM pools that need tick array reload
     tick_reload_queue: tokio::sync::Mutex<Vec<TickArrayReloadRequest>>,
+    /// Queue of DLMM pools that need bin array reload
+    bin_array_reload_queue: tokio::sync::Mutex<Vec<BinArrayReloadRequest>>,
     /// Notify: CLMM pools need tick array reload
     tick_reload_notify: Arc<tokio::sync::Notify>,
 }
@@ -36,6 +44,7 @@ impl PoolStateCache {
             tick_array_to_pool: DashMap::new(),
             update_tx,
             tick_reload_queue: tokio::sync::Mutex::new(Vec::new()),
+            bin_array_reload_queue: tokio::sync::Mutex::new(Vec::new()),
             tick_reload_notify,
         }
     }
@@ -162,23 +171,75 @@ impl PoolStateCache {
                     fee_numerator: *existing_fn,
                     fee_denominator: *existing_fd,
                 }
+            } else if let (
+                PoolMath::MeteoraDlmm {
+                    bin_arrays: ref existing_ba,
+                    active_id: old_active_id,
+                    ..
+                },
+                PoolMath::MeteoraDlmm {
+                    active_id: new_active_id,
+                    bin_step,
+                    base_factor,
+                    variable_fee_control,
+                    max_volatility_accumulator,
+                    volatility_accumulator,
+                    volatility_reference,
+                    index_reference,
+                    bin_arrays: ref new_ba,
+                },
+            ) = (&pool.math, &math) {
+                // Preserve existing bin_arrays (they come from separate accounts, not LbPair)
+                let bin_arrays = if new_ba.is_empty() { existing_ba.clone() } else { new_ba.clone() };
+
+                // Check if active_id moved outside the loaded bin array range
+                if !bin_arrays.is_empty() && *new_active_id != *old_active_id {
+                    let new_ba_index = super::decoder::meteora_dlmm::bin_id_to_bin_array_index(*new_active_id);
+                    let covered = bin_arrays.iter().any(|ba| ba.index == new_ba_index);
+                    if !covered {
+                        needs_tick_reload = true; // reuse flag for bin array reload
+                    }
+                }
+
+                PoolMath::MeteoraDlmm {
+                    active_id: *new_active_id,
+                    bin_step: *bin_step,
+                    base_factor: *base_factor,
+                    variable_fee_control: *variable_fee_control,
+                    max_volatility_accumulator: *max_volatility_accumulator,
+                    volatility_accumulator: *volatility_accumulator,
+                    volatility_reference: *volatility_reference,
+                    index_reference: *index_reference,
+                    bin_arrays,
+                }
             } else {
                 math
             };
 
-            // Queue tick reload if needed (before updating pool, to capture new tick_current)
+            // Queue tick/bin array reload if needed
             if needs_tick_reload {
                 if let PoolMath::Concentrated { tick_current, tick_spacing, .. } = &math {
                     log::debug!("CLMM {} tick moved out of range (tick={}), queuing tick array reload",
                         address, tick_current);
-                    // Use try_lock to avoid blocking — if locked, skip (next update will catch it)
                     if let Ok(mut queue) = self.tick_reload_queue.try_lock() {
-                        // Don't queue duplicates
                         if !queue.iter().any(|r| r.pool_address == *address) {
                             queue.push(TickArrayReloadRequest {
                                 pool_address: *address,
                                 tick_current: *tick_current,
                                 tick_spacing: *tick_spacing,
+                            });
+                            self.tick_reload_notify.notify_one();
+                        }
+                    }
+                }
+                if let PoolMath::MeteoraDlmm { active_id, .. } = &math {
+                    log::debug!("DLMM {} active_id moved out of range (id={}), queuing bin array reload",
+                        address, active_id);
+                    if let Ok(mut queue) = self.bin_array_reload_queue.try_lock() {
+                        if !queue.iter().any(|r| r.pool_address == *address) {
+                            queue.push(BinArrayReloadRequest {
+                                pool_address: *address,
+                                active_id: *active_id,
                             });
                             self.tick_reload_notify.notify_one();
                         }
@@ -348,6 +409,88 @@ impl PoolStateCache {
     pub async fn drain_tick_reload_requests(&self) -> Vec<TickArrayReloadRequest> {
         let mut queue = self.tick_reload_queue.lock().await;
         std::mem::take(&mut *queue)
+    }
+
+    /// Drain pending bin array reload requests.
+    pub async fn drain_bin_array_reload_requests(&self) -> Vec<BinArrayReloadRequest> {
+        let mut queue = self.bin_array_reload_queue.lock().await;
+        std::mem::take(&mut *queue)
+    }
+
+    /// Update a single bin array in a DLMM pool and emit a PoolUpdate.
+    pub fn update_bin_array(
+        &self,
+        bin_array_address: &Pubkey,
+        new_bin_array: DlmmBinArray,
+        slot: u64,
+    ) {
+        let pool_address = match self.pool_by_tick_array(bin_array_address) {
+            Some(addr) => addr,
+            None => return,
+        };
+
+        if let Some(mut pool) = self.pools.get_mut(&pool_address) {
+            if let PoolMath::MeteoraDlmm {
+                ref mut bin_arrays,
+                ..
+            } = pool.math
+            {
+                // Replace bin array with matching index, or append
+                let idx = new_bin_array.index;
+                if let Some(existing) = bin_arrays.iter_mut().find(|ba| ba.index == idx) {
+                    *existing = new_bin_array;
+                } else {
+                    bin_arrays.push(new_bin_array);
+                }
+            }
+
+            if matches!(pool.math, PoolMath::MeteoraDlmm { .. }) {
+                pool.last_updated_slot = slot;
+
+                let update = PoolUpdate {
+                    pool_address: pool.address,
+                    dex_type: pool.dex_type,
+                    mint_a: pool.mint_a,
+                    mint_b: pool.mint_b,
+                    vault_a: pool.vault_a,
+                    vault_b: pool.vault_b,
+                    mint_a_is_2022: pool.mint_a_is_2022,
+                    mint_b_is_2022: pool.mint_b_is_2022,
+                    extra_accounts: pool.extra_accounts.clone(),
+                    math: pool.math.clone(),
+                    slot,
+                };
+                let _ = self.update_tx.try_send(update);
+            }
+        }
+    }
+
+    /// Replace all bin arrays for a DLMM pool and emit a PoolUpdate.
+    pub fn replace_bin_arrays(&self, address: &Pubkey, new_bin_arrays: Vec<DlmmBinArray>, slot: u64) {
+        if let Some(mut pool) = self.pools.get_mut(address) {
+            if let PoolMath::MeteoraDlmm { ref mut bin_arrays, .. } = pool.math {
+                *bin_arrays = new_bin_arrays;
+            }
+
+            if matches!(pool.math, PoolMath::MeteoraDlmm { .. }) {
+                pool.last_updated_slot = slot;
+
+                let update = PoolUpdate {
+                    pool_address: pool.address,
+                    dex_type: pool.dex_type,
+                    mint_a: pool.mint_a,
+                    mint_b: pool.mint_b,
+                    vault_a: pool.vault_a,
+                    vault_b: pool.vault_b,
+                    mint_a_is_2022: pool.mint_a_is_2022,
+                    mint_b_is_2022: pool.mint_b_is_2022,
+                    extra_accounts: pool.extra_accounts.clone(),
+                    math: pool.math.clone(),
+                    slot,
+                };
+                let _ = self.update_tx.try_send(update);
+            }
+        }
     }
 
     /// Replace tick arrays for a CLMM pool and emit a PoolUpdate.

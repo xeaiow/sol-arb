@@ -378,6 +378,8 @@ fn try_closed_form(
             let p2 = extract_clmm(&pool2.math)?;
             closed_form_clmm_clmm(&p1, &p2, hop1.is_a_to_b, hop2.is_a_to_b)
         }
+        // MeteoraDlmm: no closed-form; fall back to ternary search
+        _ => None,
     };
 
     // Cap by max_amount

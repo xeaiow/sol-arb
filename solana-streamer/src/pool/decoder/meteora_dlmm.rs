@@ -1,13 +1,20 @@
 use solana_sdk::pubkey::Pubkey;
 
-use crate::pool::state::{DexType, PoolMath, PoolState};
+use crate::pool::state::{DexType, DlmmBin, DlmmBinArray, PoolMath, PoolState};
 use crate::streaming::event_parser::protocols::meteora_dlmm::events::MeteoraDlmmLbPairAccountEvent;
 
 /// Meteora DLMM program ID
-const METEORA_DLMM_PROGRAM: Pubkey = solana_sdk::pubkey!("LBUZKhRxPF3XUpBCjp4YzTKgLccjZhTSDM9YuVaPwxo");
+pub const METEORA_DLMM_PROGRAM: Pubkey = solana_sdk::pubkey!("LBUZKhRxPF3XUpBCjp4YzTKgLccjZhTSDM9YuVaPwxo");
 
 /// Number of bins per bin array
 const BINS_PER_ARRAY: i32 = 70;
+
+/// Size of each bin in the bin array account (bytes)
+const BIN_SIZE: usize = 144;
+
+/// Header size before bins start in bin array account:
+/// discriminator(8) + index(8) + version(1) + padding(7) + lb_pair(32) = 56
+const BIN_ARRAY_HEADER_SIZE: usize = 56;
 
 /// Compute the bin array index that contains a given bin_id.
 /// Uses floor division (rounds toward negative infinity for negative bin_ids).
@@ -32,7 +39,7 @@ pub fn bin_array_pda(lb_pair: &Pubkey, index: i64) -> Pubkey {
 }
 
 /// Compute 3 bin array PDAs needed for swap: current-1, current, current+1.
-fn bin_array_pdas_for_swap(lb_pair: &Pubkey, active_id: i32) -> [Pubkey; 3] {
+pub fn bin_array_pdas_for_swap(lb_pair: &Pubkey, active_id: i32) -> [Pubkey; 3] {
     let idx = bin_id_to_bin_array_index(active_id);
     [
         bin_array_pda(lb_pair, idx - 1),
@@ -41,17 +48,62 @@ fn bin_array_pdas_for_swap(lb_pair: &Pubkey, active_id: i32) -> [Pubkey; 3] {
     ]
 }
 
-/// Decode from a parsed account event.
-///
-/// DLMM uses bin-based constant-sum within each bin. For off-chain quoting we
-/// approximate as ConstantProduct with vault balances (filled in later via
-/// gRPC vault subscription). The fee is computed from base_factor and bin_step:
-///   base_fee = base_factor * bin_step * 10 / 1e9
-/// We store this as fee_numerator / fee_denominator.
-pub fn decode(event: &MeteoraDlmmLbPairAccountEvent) -> Option<PoolState> {
-    // base_fee = base_factor * bin_step * 10 (in units of 1e-9)
-    let base_fee = event.parameters.base_factor as u64 * event.bin_step as u64 * 10;
+/// Parse DLMM fee parameters common to both decode() and decode_bytes().
+struct DlmmFeeParams {
+    active_id: i32,
+    bin_step: u16,
+    base_factor: u16,
+    variable_fee_control: u32,
+    max_volatility_accumulator: u32,
+    volatility_accumulator: u32,
+    volatility_reference: u32,
+    index_reference: i32,
+}
 
+/// Parse fee parameters from raw LbPair account bytes.
+///
+/// LbPair layout (after 8-byte Anchor discriminator):
+///   parameters.base_factor: u16     offset 8
+///   variable_fee_control: u32       offset 16
+///   max_volatility_accumulator: u32 offset 20
+///   v_parameters.volatility_accumulator: u32 offset 40
+///   v_parameters.volatility_reference: u32   offset 44
+///   v_parameters.index_reference: i32        offset 48
+///   active_id: i32                  offset 84
+///   bin_step: u16                   offset 88
+fn parse_fee_params(data: &[u8]) -> Option<DlmmFeeParams> {
+    if data.len() < 90 {
+        return None;
+    }
+    Some(DlmmFeeParams {
+        base_factor: u16::from_le_bytes(data[8..10].try_into().ok()?),
+        variable_fee_control: u32::from_le_bytes(data[16..20].try_into().ok()?),
+        max_volatility_accumulator: u32::from_le_bytes(data[20..24].try_into().ok()?),
+        volatility_accumulator: u32::from_le_bytes(data[40..44].try_into().ok()?),
+        volatility_reference: u32::from_le_bytes(data[44..48].try_into().ok()?),
+        index_reference: i32::from_le_bytes(data[48..52].try_into().ok()?),
+        active_id: i32::from_le_bytes(data[84..88].try_into().ok()?),
+        bin_step: u16::from_le_bytes(data[88..90].try_into().ok()?),
+    })
+}
+
+/// Build PoolMath::MeteoraDlmm from fee params (bin_arrays initially empty).
+fn math_from_params(params: &DlmmFeeParams) -> PoolMath {
+    PoolMath::MeteoraDlmm {
+        active_id: params.active_id,
+        bin_step: params.bin_step,
+        base_factor: params.base_factor,
+        variable_fee_control: params.variable_fee_control,
+        max_volatility_accumulator: params.max_volatility_accumulator,
+        volatility_accumulator: params.volatility_accumulator,
+        volatility_reference: params.volatility_reference,
+        index_reference: params.index_reference,
+        bin_arrays: vec![], // filled by streamer after fetch
+    }
+}
+
+/// Decode from a parsed account event.
+pub fn decode(event: &MeteoraDlmmLbPairAccountEvent) -> Option<PoolState> {
     Some(PoolState {
         address: event.pubkey,
         dex_type: DexType::MeteoraDlmm,
@@ -65,11 +117,16 @@ pub fn decode(event: &MeteoraDlmmLbPairAccountEvent) -> Option<PoolState> {
             let bin_pdas = bin_array_pdas_for_swap(&event.pubkey, event.active_id);
             vec![event.oracle, bin_pdas[0], bin_pdas[1], bin_pdas[2]]
         },
-        math: PoolMath::ConstantProduct {
-            reserve_a: 0, // filled by vault balance updates
-            reserve_b: 0,
-            fee_numerator: base_fee,
-            fee_denominator: 1_000_000_000,
+        math: PoolMath::MeteoraDlmm {
+            active_id: event.active_id,
+            bin_step: event.bin_step,
+            base_factor: event.parameters.base_factor,
+            variable_fee_control: event.parameters.variable_fee_control,
+            max_volatility_accumulator: event.parameters.max_volatility_accumulator,
+            volatility_accumulator: event.v_parameters.volatility_accumulator,
+            volatility_reference: event.v_parameters.volatility_reference,
+            index_reference: event.v_parameters.index_reference,
+            bin_arrays: vec![],
         },
         last_updated_slot: event.metadata.slot,
     })
@@ -79,16 +136,18 @@ pub fn decode(event: &MeteoraDlmmLbPairAccountEvent) -> Option<PoolState> {
 ///
 /// LbPair layout (after 8-byte Anchor discriminator):
 ///   parameters.base_factor: u16     offset 8
-///   ...
+///   variable_fee_control: u32       offset 16
+///   max_volatility_accumulator: u32 offset 20
+///   v_parameters.volatility_accumulator: u32 offset 40
+///   v_parameters.volatility_reference: u32   offset 44
+///   v_parameters.index_reference: i32        offset 48
 ///   active_id: i32                  offset 84
 ///   bin_step: u16                   offset 88
 ///   status: u8                      offset 90
-///   ...
 ///   token_x_mint: Pubkey (32)       offset 96
 ///   token_y_mint: Pubkey (32)       offset 128
 ///   reserve_x: Pubkey (32)          offset 160
 ///   reserve_y: Pubkey (32)          offset 192
-///   ...
 ///   oracle: Pubkey (32)             offset 560
 ///
 /// Minimum: 904 bytes total
@@ -97,15 +156,7 @@ pub fn decode_bytes(address: &Pubkey, data: &[u8]) -> Option<PoolState> {
         return None;
     }
 
-    // base_factor at offset 8 (u16 LE)
-    let base_factor = u16::from_le_bytes(data[8..10].try_into().ok()?) as u64;
-    // bin_step at offset 88 (u16 LE)
-    let bin_step = u16::from_le_bytes(data[88..90].try_into().ok()?) as u64;
-
-    let base_fee = base_factor * bin_step * 10;
-
-    // active_id at offset 84 (i32 LE)
-    let active_id = i32::from_le_bytes(data[84..88].try_into().ok()?);
+    let params = parse_fee_params(data)?;
 
     let token_x_mint = Pubkey::try_from(&data[96..128]).ok()?;
     let token_y_mint = Pubkey::try_from(&data[128..160]).ok()?;
@@ -129,17 +180,56 @@ pub fn decode_bytes(address: &Pubkey, data: &[u8]) -> Option<PoolState> {
         mint_a_is_2022: false,
         mint_b_is_2022: false,
         extra_accounts: {
-            let bin_pdas = bin_array_pdas_for_swap(address, active_id);
+            let bin_pdas = bin_array_pdas_for_swap(address, params.active_id);
             vec![oracle, bin_pdas[0], bin_pdas[1], bin_pdas[2]]
         },
-        math: PoolMath::ConstantProduct {
-            reserve_a: 0,
-            reserve_b: 0,
-            fee_numerator: base_fee,
-            fee_denominator: 1_000_000_000,
-        },
+        math: math_from_params(&params),
         last_updated_slot: 0,
     })
+}
+
+/// Decode a bin array account into DlmmBinArray.
+///
+/// Bin array layout:
+///   discriminator: 8 bytes
+///   index: i64 (8 bytes)
+///   version: u8 (1 byte)
+///   padding: 7 bytes
+///   lb_pair: Pubkey (32 bytes)
+///   --- total header: 56 bytes ---
+///   bins[0..70]: 70 × 144 bytes each
+///     amount_x: u64 (8 bytes)
+///     amount_y: u64 (8 bytes)
+///     ... (remaining 128 bytes per bin not needed)
+///
+/// Minimum size: 56 + 70 × 144 = 10136 bytes
+pub fn decode_bin_array(data: &[u8]) -> Option<DlmmBinArray> {
+    let min_size = BIN_ARRAY_HEADER_SIZE + BINS_PER_ARRAY as usize * BIN_SIZE;
+    if data.len() < min_size {
+        return None;
+    }
+
+    let index = i64::from_le_bytes(data[8..16].try_into().ok()?);
+
+    let mut bins = Vec::new();
+    let start_bin_id = (index as i32) * BINS_PER_ARRAY;
+
+    for i in 0..BINS_PER_ARRAY as usize {
+        let offset = BIN_ARRAY_HEADER_SIZE + i * BIN_SIZE;
+        let amount_x = u64::from_le_bytes(data[offset..offset + 8].try_into().ok()?);
+        let amount_y = u64::from_le_bytes(data[offset + 8..offset + 16].try_into().ok()?);
+
+        // Only include bins with liquidity
+        if amount_x > 0 || amount_y > 0 {
+            bins.push(DlmmBin {
+                bin_id: start_bin_id + i as i32,
+                amount_x,
+                amount_y,
+            });
+        }
+    }
+
+    Some(DlmmBinArray { index, bins })
 }
 
 #[cfg(test)]
@@ -175,19 +265,19 @@ mod tests {
         assert_eq!(pool.vault_b, Some(Pubkey::new_from_array([4u8; 32])));
 
         match pool.math {
-            PoolMath::ConstantProduct {
-                reserve_a,
-                reserve_b,
-                fee_numerator,
-                fee_denominator,
+            PoolMath::MeteoraDlmm {
+                active_id,
+                bin_step,
+                base_factor,
+                ref bin_arrays,
+                ..
             } => {
-                assert_eq!(reserve_a, 0);
-                assert_eq!(reserve_b, 0);
-                // base_fee = 10000 * 10 * 10 = 1_000_000
-                assert_eq!(fee_numerator, 1_000_000);
-                assert_eq!(fee_denominator, 1_000_000_000);
+                assert_eq!(active_id, 0);
+                assert_eq!(bin_step, 10);
+                assert_eq!(base_factor, 10000);
+                assert!(bin_arrays.is_empty()); // filled later by streamer
             }
-            _ => panic!("Expected ConstantProduct math"),
+            _ => panic!("Expected MeteoraDlmm math"),
         }
     }
 
@@ -196,5 +286,69 @@ mod tests {
         let data = vec![0u8; 100];
         let address = Pubkey::new_unique();
         assert!(decode_bytes(&address, &data).is_none());
+    }
+
+    #[test]
+    fn test_decode_bin_array_basic() {
+        let min_size = BIN_ARRAY_HEADER_SIZE + BINS_PER_ARRAY as usize * BIN_SIZE;
+        let mut data = vec![0u8; min_size];
+
+        // discriminator (8 bytes)
+        data[0..8].copy_from_slice(&[0u8; 8]);
+        // index = 5 (i64)
+        data[8..16].copy_from_slice(&5i64.to_le_bytes());
+
+        // Set bin at position 0 with liquidity
+        let bin0_offset = BIN_ARRAY_HEADER_SIZE;
+        data[bin0_offset..bin0_offset + 8].copy_from_slice(&1000u64.to_le_bytes()); // amount_x
+        data[bin0_offset + 8..bin0_offset + 16].copy_from_slice(&2000u64.to_le_bytes()); // amount_y
+
+        // Set bin at position 3 with only Y liquidity
+        let bin3_offset = BIN_ARRAY_HEADER_SIZE + 3 * BIN_SIZE;
+        data[bin3_offset..bin3_offset + 8].copy_from_slice(&0u64.to_le_bytes()); // amount_x = 0
+        data[bin3_offset + 8..bin3_offset + 16].copy_from_slice(&5000u64.to_le_bytes()); // amount_y
+
+        let ba = decode_bin_array(&data).unwrap();
+        assert_eq!(ba.index, 5);
+        assert_eq!(ba.bins.len(), 2); // only bins with liquidity
+
+        // bin_id = 5 * 70 + 0 = 350
+        assert_eq!(ba.bins[0].bin_id, 350);
+        assert_eq!(ba.bins[0].amount_x, 1000);
+        assert_eq!(ba.bins[0].amount_y, 2000);
+
+        // bin_id = 5 * 70 + 3 = 353
+        assert_eq!(ba.bins[1].bin_id, 353);
+        assert_eq!(ba.bins[1].amount_x, 0);
+        assert_eq!(ba.bins[1].amount_y, 5000);
+    }
+
+    #[test]
+    fn test_decode_bin_array_too_short() {
+        let data = vec![0u8; 100];
+        assert!(decode_bin_array(&data).is_none());
+    }
+
+    #[test]
+    fn test_decode_bin_array_empty() {
+        let min_size = BIN_ARRAY_HEADER_SIZE + BINS_PER_ARRAY as usize * BIN_SIZE;
+        let mut data = vec![0u8; min_size];
+        data[8..16].copy_from_slice(&0i64.to_le_bytes()); // index = 0
+
+        let ba = decode_bin_array(&data).unwrap();
+        assert_eq!(ba.index, 0);
+        assert!(ba.bins.is_empty()); // no liquidity
+    }
+
+    #[test]
+    fn test_bin_id_to_bin_array_index() {
+        assert_eq!(bin_id_to_bin_array_index(0), 0);
+        assert_eq!(bin_id_to_bin_array_index(69), 0);
+        assert_eq!(bin_id_to_bin_array_index(70), 1);
+        assert_eq!(bin_id_to_bin_array_index(139), 1);
+        assert_eq!(bin_id_to_bin_array_index(140), 2);
+        assert_eq!(bin_id_to_bin_array_index(-1), -1);
+        assert_eq!(bin_id_to_bin_array_index(-70), -1);
+        assert_eq!(bin_id_to_bin_array_index(-71), -2);
     }
 }

@@ -151,6 +151,9 @@ impl TokenGraph {
             PoolMath::Concentrated { liquidity, .. } => {
                 *liquidity > 0
             }
+            PoolMath::MeteoraDlmm { bin_arrays, .. } => {
+                !bin_arrays.is_empty()
+            }
         }
     }
 
@@ -166,6 +169,7 @@ impl TokenGraph {
             PoolMath::Concentrated { fee_rate, .. } => {
                 *fee_rate as f64 / 1_000_000.0
             }
+            PoolMath::MeteoraDlmm { .. } => 0.0,
         }
     }
 

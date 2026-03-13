@@ -14,6 +14,21 @@ pub struct TickArray {
     pub ticks: Vec<Tick>,
 }
 
+/// A single DLMM bin with liquidity info
+#[derive(Debug, Clone)]
+pub struct DlmmBin {
+    pub bin_id: i32,
+    pub amount_x: u64,
+    pub amount_y: u64,
+}
+
+/// Pre-loaded DLMM bin array (70 bins per array)
+#[derive(Debug, Clone)]
+pub struct DlmmBinArray {
+    pub index: i64,
+    pub bins: Vec<DlmmBin>,
+}
+
 /// DEX type identifier
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 #[repr(u8)]
@@ -63,6 +78,21 @@ pub enum PoolMath {
         real_token_reserves: u64,
         real_sol_reserves: u64,
         complete: bool,
+    },
+
+    /// Bin-based constant-sum (Meteora DLMM)
+    MeteoraDlmm {
+        active_id: i32,
+        bin_step: u16,
+        // Fee parameters
+        base_factor: u16,
+        variable_fee_control: u32,
+        max_volatility_accumulator: u32,
+        volatility_accumulator: u32,
+        volatility_reference: u32,
+        index_reference: i32,
+        /// Pre-loaded bin arrays (typically 3: current-1, current, current+1)
+        bin_arrays: Vec<DlmmBinArray>,
     },
 }
 
@@ -137,6 +167,34 @@ impl PoolMath {
                     *tick_spacing,
                     *fee_rate,
                     tick_arrays,
+                )
+            }
+            PoolMath::MeteoraDlmm {
+                active_id,
+                bin_step,
+                base_factor,
+                variable_fee_control,
+                max_volatility_accumulator,
+                volatility_accumulator,
+                volatility_reference,
+                index_reference,
+                bin_arrays,
+            } => {
+                if bin_arrays.is_empty() {
+                    return 0;
+                }
+                dlmm_get_amount_out(
+                    amount_in,
+                    is_a_to_b,
+                    *active_id,
+                    *bin_step,
+                    *base_factor,
+                    *variable_fee_control,
+                    *max_volatility_accumulator,
+                    *volatility_accumulator,
+                    *volatility_reference,
+                    *index_reference,
+                    bin_arrays,
                 )
             }
         }
@@ -294,6 +352,174 @@ fn clmm_get_amount_out(
     // over-quoting that leads to simulate failures.
     let out = amount_out * 0.997;
     out.max(0.0) as u64
+}
+
+/// DLMM bin-level constant-sum quote (f64 fast-path).
+///
+/// Walks through bins from active_id in the swap direction, consuming
+/// liquidity from each bin using constant-sum math within each bin.
+/// Price per bin = (1 + bin_step/10000)^bin_id.
+#[allow(clippy::too_many_arguments)]
+fn dlmm_get_amount_out(
+    amount_in: u64,
+    is_a_to_b: bool,
+    active_id: i32,
+    bin_step: u16,
+    base_factor: u16,
+    variable_fee_control: u32,
+    max_volatility_accumulator: u32,
+    volatility_accumulator: u32,
+    volatility_reference: u32,
+    index_reference: i32,
+    bin_arrays: &[DlmmBinArray],
+) -> u64 {
+    if amount_in == 0 || bin_step == 0 {
+        return 0;
+    }
+
+    // Compute base fee rate: base_factor * bin_step * 10 / 1e9
+    let base_fee = base_factor as f64 * bin_step as f64 * 10.0 / 1_000_000_000.0;
+
+    // Compute variable fee rate
+    let var_fee = if variable_fee_control > 0 {
+        let va_bin = volatility_accumulator as f64 * bin_step as f64;
+        let v = variable_fee_control as f64 * va_bin * va_bin / 100_000_000_000.0;
+        v.min(0.1) // cap at 10%
+    } else {
+        0.0
+    };
+
+    let _total_fee_rate = (base_fee + var_fee).min(0.1); // cap total at 10%
+
+    // Collect all bins from bin_arrays, sorted by bin_id
+    let mut all_bins: Vec<&DlmmBin> = bin_arrays
+        .iter()
+        .flat_map(|ba| ba.bins.iter())
+        .collect();
+    all_bins.sort_by_key(|b| b.bin_id);
+
+    // is_a_to_b means X→Y (swap_for_y = true): traverse bins downward from active_id
+    // !is_a_to_b means Y→X (swap_for_y = false): traverse bins upward from active_id
+    let swap_for_y = is_a_to_b;
+
+    let mut remaining = amount_in as f64;
+    let mut total_out: f64 = 0.0;
+
+    let step_bps = bin_step as f64 / 10000.0;
+
+    if swap_for_y {
+        // X→Y: price decreases, traverse from active_id downward
+        // Bins with Y liquidity can accept X input
+        let relevant: Vec<&&DlmmBin> = all_bins
+            .iter()
+            .filter(|b| b.bin_id <= active_id && b.amount_y > 0)
+            .rev() // highest bin_id first (start from active)
+            .collect();
+
+        for bin in relevant {
+            if remaining <= 0.0 {
+                break;
+            }
+
+            let price = (1.0 + step_bps).powi(bin.bin_id);
+            if price <= 0.0 {
+                continue;
+            }
+
+            // Dynamic fee for this bin
+            let fee_rate = dlmm_dynamic_fee_rate(
+                bin.bin_id, base_fee, variable_fee_control,
+                max_volatility_accumulator, volatility_reference,
+                index_reference, bin_step,
+            );
+
+            // Max X that can consume all Y in this bin: max_x = amount_y / price
+            let max_x_net = bin.amount_y as f64 / price;
+            let max_x_gross = max_x_net / (1.0 - fee_rate);
+
+            let consumed = remaining.min(max_x_gross);
+            let consumed_after_fee = consumed * (1.0 - fee_rate);
+
+            let out = if consumed >= max_x_gross {
+                bin.amount_y as f64
+            } else {
+                consumed_after_fee * price
+            };
+
+            total_out += out;
+            remaining -= consumed;
+        }
+    } else {
+        // Y→X: price increases, traverse from active_id upward
+        // Bins with X liquidity can accept Y input
+        let relevant: Vec<&&DlmmBin> = all_bins
+            .iter()
+            .filter(|b| b.bin_id >= active_id && b.amount_x > 0)
+            .collect(); // lowest bin_id first (start from active)
+
+        for bin in relevant {
+            if remaining <= 0.0 {
+                break;
+            }
+
+            let price = (1.0 + step_bps).powi(bin.bin_id);
+            if price <= 0.0 {
+                continue;
+            }
+
+            let fee_rate = dlmm_dynamic_fee_rate(
+                bin.bin_id, base_fee, variable_fee_control,
+                max_volatility_accumulator, volatility_reference,
+                index_reference, bin_step,
+            );
+
+            // Max Y that can consume all X in this bin: max_y = amount_x * price
+            let max_y_net = bin.amount_x as f64 * price;
+            let max_y_gross = max_y_net / (1.0 - fee_rate);
+
+            let consumed = remaining.min(max_y_gross);
+            let consumed_after_fee = consumed * (1.0 - fee_rate);
+
+            let out = if consumed >= max_y_gross {
+                bin.amount_x as f64
+            } else {
+                consumed_after_fee / price
+            };
+
+            total_out += out;
+            remaining -= consumed;
+        }
+    }
+
+    // Apply 0.5% haircut for f64 precision loss (similar to CLMM's 0.3%)
+    let out = total_out * 0.995;
+    out.max(0.0) as u64
+}
+
+/// Compute dynamic fee rate for a specific bin_id.
+/// Returns fee as a fraction (e.g. 0.001 = 0.1%).
+#[inline]
+fn dlmm_dynamic_fee_rate(
+    bin_id: i32,
+    base_fee: f64,
+    variable_fee_control: u32,
+    max_volatility_accumulator: u32,
+    volatility_reference: u32,
+    index_reference: i32,
+    bin_step: u16,
+) -> f64 {
+    if variable_fee_control == 0 {
+        return base_fee;
+    }
+
+    let delta_id = (index_reference as i64 - bin_id as i64).unsigned_abs();
+    let va = (volatility_reference as u64 + delta_id * 10_000)
+        .min(max_volatility_accumulator as u64);
+
+    let va_bin = va as f64 * bin_step as f64;
+    let v_fee = variable_fee_control as f64 * va_bin * va_bin / 100_000_000_000.0;
+
+    (base_fee + v_fee).min(0.1)
 }
 
 /// Convert a tick index to sqrt_price (f64).

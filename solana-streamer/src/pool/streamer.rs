@@ -142,6 +142,13 @@ impl PoolStreamer {
             }
         }
 
+        // 4a. Handle DLMM bin array updates
+        if let DexEvent::MeteoraDlmmBinArrayAccountEvent(ref ba_event) = event {
+            if let Some(ba) = decoder::meteora_dlmm::decode_bin_array(&ba_event.data) {
+                self.cache.update_bin_array(&ba_event.pubkey, ba, ba_event.metadata.slot);
+            }
+        }
+
         // 4. Handle CLMM tick array updates (Raydium CLMM)
         if let DexEvent::RaydiumClmmTickArrayStateAccountEvent(ref ta_event) = event {
             let ta = decoder::raydium_clmm::tick_array_from_state(&ta_event.tick_array_state);
@@ -253,6 +260,12 @@ impl PoolStreamer {
         if pool_state.dex_type == DexType::RaydiumClmm {
             let addr = pool_state.address;
             self.fetch_clmm_extras(&addr, &mut pool_state).await;
+        }
+
+        // For DLMM pools: fetch bin arrays (3 around active_id)
+        if pool_state.dex_type == DexType::MeteoraDlmm {
+            let addr = pool_state.address;
+            self.fetch_dlmm_bin_arrays(&addr, &mut pool_state).await;
         }
 
         // For Orca Whirlpool pools: fetch tick arrays (fee_rate already in pool state)
@@ -415,6 +428,120 @@ impl PoolStreamer {
             "Whirlpool {} tick_arrays: {} loaded, {} failed (tick={}, spacing={})",
             pool_address, loaded, failed, tick_current, tick_spacing
         );
+    }
+
+    /// Fetch bin arrays for a DLMM pool (3 arrays around active_id).
+    /// Only keeps arrays that actually exist on-chain.
+    async fn fetch_dlmm_bin_arrays(&self, pool_address: &Pubkey, pool_state: &mut PoolState) {
+        let active_id = match pool_state.math {
+            PoolMath::MeteoraDlmm { active_id, .. } => active_id,
+            _ => return,
+        };
+
+        let bin_pdas = decoder::meteora_dlmm::bin_array_pdas_for_swap(pool_address, active_id);
+        let mut pending = self.pending_subscriptions.lock().await;
+
+        let mut fetched_arrays = Vec::with_capacity(3);
+        let mut existing_pdas = Vec::with_capacity(3);
+        let mut loaded = 0u32;
+        let mut failed = 0u32;
+
+        for pda in &bin_pdas {
+            match self.rpc.get_account_data(pda).await {
+                Ok(data) => {
+                    if let Some(ba) = decoder::meteora_dlmm::decode_bin_array(&data) {
+                        fetched_arrays.push(ba);
+                        existing_pdas.push(*pda);
+                        self.cache.register_tick_array(*pda, *pool_address);
+                        pending.push(pda.to_string());
+                        loaded += 1;
+                    }
+                }
+                Err(_) => {
+                    failed += 1;
+                }
+            }
+        }
+
+        // Update bin_arrays in math
+        if let PoolMath::MeteoraDlmm { ref mut bin_arrays, .. } = pool_state.math {
+            *bin_arrays = fetched_arrays;
+        }
+
+        // Update extra_accounts to only include existing bin array PDAs
+        // Layout: [oracle, existing_bin_array_pdas...]
+        if !pool_state.extra_accounts.is_empty() {
+            let oracle = pool_state.extra_accounts[0];
+            let mut new_extra = vec![oracle];
+            new_extra.extend(existing_pdas);
+            pool_state.extra_accounts = new_extra;
+        }
+
+        info!(
+            "DLMM {} bin_arrays: {} loaded, {} not found (active_id={})",
+            pool_address, loaded, failed, active_id
+        );
+    }
+
+    /// Process pending bin array reload requests.
+    /// Fetches new bin arrays for DLMM pools where active_id moved out of range.
+    pub async fn flush_bin_array_reloads(&self) {
+        let requests = self.cache.drain_bin_array_reload_requests().await;
+        if requests.is_empty() {
+            return;
+        }
+
+        for req in requests {
+            let bin_pdas = decoder::meteora_dlmm::bin_array_pdas_for_swap(
+                &req.pool_address,
+                req.active_id,
+            );
+
+            let mut new_bin_arrays = Vec::with_capacity(3);
+            let mut pending = self.pending_subscriptions.lock().await;
+            let mut new_extra = Vec::with_capacity(4);
+
+            // Preserve oracle from existing extra_accounts
+            if let Some(pool) = self.cache.get(&req.pool_address) {
+                if let Some(oracle) = pool.extra_accounts.first() {
+                    new_extra.push(*oracle);
+                }
+            }
+
+            for pda in &bin_pdas {
+                self.cache.register_tick_array(*pda, req.pool_address);
+                pending.push(pda.to_string());
+                match self.rpc.get_account_data(pda).await {
+                    Ok(data) => {
+                        if let Some(ba) = decoder::meteora_dlmm::decode_bin_array(&data) {
+                            new_bin_arrays.push(ba);
+                            new_extra.push(*pda);
+                        }
+                    }
+                    Err(_) => {
+                        // Bin array doesn't exist — skip
+                    }
+                }
+            }
+
+            if !new_bin_arrays.is_empty() {
+                info!(
+                    "DLMM {} bin array reload: {} loaded (active_id={})",
+                    req.pool_address, new_bin_arrays.len(), req.active_id
+                );
+                let reload_slot = self.cache.get(&req.pool_address)
+                    .map(|p| p.last_updated_slot)
+                    .unwrap_or(1);
+                self.cache.replace_bin_arrays(&req.pool_address, new_bin_arrays, reload_slot);
+
+                // Update extra_accounts with only existing bin arrays
+                if let Some(mut pool) = self.cache.get(&req.pool_address).map(|p| p.clone()) {
+                    pool.extra_accounts = new_extra;
+                    // Re-insert to update extra_accounts (update_math doesn't touch extra_accounts)
+                    // We emit a PoolUpdate via replace_bin_arrays above already
+                }
+            }
+        }
     }
 
     /// Apply PumpSwap fee rates from cached GlobalConfig.

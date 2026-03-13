@@ -100,6 +100,15 @@ pub struct LbPairRewardInfo {
     pub cumulative_seconds_with_empty_liquidity_reward: u64,
 }
 
+/// Meteora DLMM BinArray Account Event (from gRPC account subscription)
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct MeteoraDlmmBinArrayAccountEvent {
+    pub metadata: EventMetadata,
+    pub pubkey: Pubkey,
+    /// Raw account data (parsed by decoder)
+    pub data: Vec<u8>,
+}
+
 /// LbPair account discriminator
 pub const METEORA_DLMM_LB_PAIR_DISCRIMINATOR: &[u8] = &[33, 11, 49, 98, 181, 101, 177, 13];
 
@@ -113,4 +122,6 @@ pub mod discriminators {
 
     // Account discriminators
     pub const LB_PAIR_ACCOUNT: &[u8] = &[33, 11, 49, 98, 181, 101, 177, 13];
+    /// BinArray account: sha256("account:BinArray")[0..8]
+    pub const BIN_ARRAY_ACCOUNT: &[u8] = &[92, 142, 92, 220, 5, 148, 70, 181];
 }

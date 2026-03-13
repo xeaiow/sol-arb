@@ -1,7 +1,8 @@
 use crate::streaming::event_parser::{
     common::{read_u64_le, EventMetadata, EventType},
     protocols::meteora_dlmm::{
-        discriminators, MeteoraDlmmLbPairAccountEvent, MeteoraDlmmSwap2Event,
+        discriminators, MeteoraDlmmLbPairAccountEvent, MeteoraDlmmBinArrayAccountEvent,
+        MeteoraDlmmSwap2Event,
         LbPairParameters, LbPairVParameters, LbPairRewardInfo,
         METEORA_DLMM_LB_PAIR_ACCOUNT_MIN_SIZE,
     },
@@ -49,6 +50,7 @@ pub fn parse_meteora_dlmm_account_data(
 ) -> Option<crate::streaming::event_parser::DexEvent> {
     match discriminator {
         discriminators::LB_PAIR_ACCOUNT => parse_lb_pair_account(account, metadata),
+        discriminators::BIN_ARRAY_ACCOUNT => parse_bin_array_account(account, metadata),
         _ => None,
     }
 }
@@ -338,5 +340,23 @@ fn parse_lb_pair_account(
         pre_activation_slot_duration,
         lock_duration,
         creator,
+    }))
+}
+
+/// 解析 BinArray 帳戶資料
+/// BinArray 最小大小: 56 (header) + 70 * 144 (bins) = 10136 bytes
+fn parse_bin_array_account(
+    account: &crate::streaming::grpc::AccountPretty,
+    mut metadata: EventMetadata,
+) -> Option<DexEvent> {
+    metadata.event_type = EventType::AccountMeteoraDlmmLbPair; // reuse event type
+    if account.data.len() < 10136 {
+        return None;
+    }
+
+    Some(DexEvent::MeteoraDlmmBinArrayAccountEvent(MeteoraDlmmBinArrayAccountEvent {
+        metadata,
+        pubkey: account.pubkey,
+        data: account.data.clone(),
     }))
 }

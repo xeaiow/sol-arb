@@ -70,6 +70,18 @@ async fn main() -> anyhow::Result<()> {
                         sqrt_price_x64, liquidity, tick_current
                     );
                 }
+                PoolMath::MeteoraDlmm {
+                    active_id,
+                    bin_step,
+                    ref bin_arrays,
+                    ..
+                } => {
+                    println!(
+                        "[slot {}] Pool {} ({:?}) DLMM: active_id={}, bin_step={}, bin_arrays={}",
+                        update.slot, update.pool_address, update.dex_type,
+                        active_id, bin_step, bin_arrays.len()
+                    );
+                }
             }
         }
     });

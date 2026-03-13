@@ -50,6 +50,7 @@ fn max_stale_slots(pool: &PoolEntry) -> u64 {
         PoolMath::Concentrated { liquidity, .. } => {
             (*liquidity / 1_000_000) as u64
         }
+        PoolMath::MeteoraDlmm { .. } => 0,
     };
 
     let sol = sol_reserve as f64 / 1e9;
