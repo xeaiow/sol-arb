@@ -394,24 +394,20 @@ fn swap_meteora_dlmm(accounts: &[AccountView], amount_in: u64) -> ProgramResult 
     // min_amount_out = 0 (profit verified atomically)
     // data[16..24] already zeroed
 
-    // remaining_accounts_info: describes remaining accounts as transfer hook accounts
-    // For bin arrays, each remaining account is type 0 (AccountsType::TransferHookA = 0)
-    // Format: first byte = number of slices, then per slice: type(u8) + length(u8)
-    let bin_array_count = accounts.len().saturating_sub(16);
-    if bin_array_count > 0 {
-        // 1 slice, type=0 (TransferHookA), length=bin_array_count
-        data[24] = 1; // num_slices
-        data[25] = 0; // slice type (TransferHookA)
-        data[26] = bin_array_count as u8; // slice length
-    }
-    // else: remaining_accounts_info = all zeros = no remaining accounts
+    // remaining_accounts_info: Borsh-serialized RemainingAccountsInfo { slices: Vec<_> }
+    // Bin arrays are NOT transfer hook accounts — set slices to empty Vec.
+    // First 4 bytes = u32 LE length = 0 (already zeroed), remaining 28 bytes = 0.
+    // This matches the reference implementation: `&0u32.to_le_bytes()`
 
     let total = accounts.len().min(24); // 16 fixed + up to 8 bin arrays
 
-    // Build instruction accounts using a fixed array initialized inline
+    // Build instruction accounts (AccountMeta layout for DLMM swap2).
+    // accounts[1] = bin_array_bitmap_extension (placeholder = DLMM program_id)
+    // accounts[9] = host_fee_in (placeholder = DLMM program_id)
+    // Both are optional — the placeholder tells DLMM they're absent.
     let instruction_accounts: [InstructionAccount; 24] = [
         InstructionAccount::writable(accounts[0].address()),           // [0] lb_pair
-        InstructionAccount::readonly(accounts[1].address()),            // [1] bin_array_bitmap_extension
+        InstructionAccount::readonly(accounts[1].address()),            // [1] bin_array_bitmap_extension (placeholder)
         InstructionAccount::writable(accounts[2].address()),           // [2] reserve_x
         InstructionAccount::writable(accounts[3].address()),           // [3] reserve_y
         InstructionAccount::writable(accounts[if total > 4 { 4 } else { 0 }].address()),  // [4] user_token_in
@@ -419,7 +415,7 @@ fn swap_meteora_dlmm(accounts: &[AccountView], amount_in: u64) -> ProgramResult 
         InstructionAccount::readonly(accounts[if total > 6 { 6 } else { 0 }].address()),  // [6] token_x_mint
         InstructionAccount::readonly(accounts[if total > 7 { 7 } else { 0 }].address()),  // [7] token_y_mint
         InstructionAccount::writable(accounts[if total > 8 { 8 } else { 0 }].address()),  // [8] oracle
-        InstructionAccount::writable(accounts[if total > 9 { 9 } else { 0 }].address()),  // [9] host_fee_in
+        InstructionAccount::readonly(accounts[if total > 9 { 9 } else { 0 }].address()),  // [9] host_fee_in (placeholder)
         InstructionAccount::readonly_signer(accounts[if total > 10 { 10 } else { 0 }].address()), // [10] user
         InstructionAccount::readonly(accounts[if total > 11 { 11 } else { 0 }].address()), // [11] token_x_program
         InstructionAccount::readonly(accounts[if total > 12 { 12 } else { 0 }].address()), // [12] token_y_program
@@ -443,23 +439,36 @@ fn swap_meteora_dlmm(accounts: &[AccountView], amount_in: u64) -> ProgramResult 
         data: &data,
     };
 
-    // Build account views slice
-    let views: [&AccountView; 24] = [
-        &accounts[0], &accounts[if total > 1 { 1 } else { 0 }],
-        &accounts[if total > 2 { 2 } else { 0 }], &accounts[if total > 3 { 3 } else { 0 }],
-        &accounts[if total > 4 { 4 } else { 0 }], &accounts[if total > 5 { 5 } else { 0 }],
-        &accounts[if total > 6 { 6 } else { 0 }], &accounts[if total > 7 { 7 } else { 0 }],
-        &accounts[if total > 8 { 8 } else { 0 }], &accounts[if total > 9 { 9 } else { 0 }],
-        &accounts[if total > 10 { 10 } else { 0 }], &accounts[if total > 11 { 11 } else { 0 }],
-        &accounts[if total > 12 { 12 } else { 0 }], &accounts[if total > 13 { 13 } else { 0 }],
-        &accounts[if total > 14 { 14 } else { 0 }], &accounts[if total > 15 { 15 } else { 0 }],
-        &accounts[if total > 16 { 16 } else { 0 }], &accounts[if total > 17 { 17 } else { 0 }],
-        &accounts[if total > 18 { 18 } else { 0 }], &accounts[if total > 19 { 19 } else { 0 }],
-        &accounts[if total > 20 { 20 } else { 0 }], &accounts[if total > 21 { 21 } else { 0 }],
-        &accounts[if total > 22 { 22 } else { 0 }], &accounts[if total > 23 { 23 } else { 0 }],
-    ];
+    // Build account views — skip bitmap_ext (index 1) and host_fee_in (index 9).
+    // These are optional accounts with placeholder pubkey = DLMM program_id.
+    // Runtime resolves them via the program account (index 15, same pubkey).
+    // This matches the reference implementation pattern.
+    let bin_array_start = 16;
+    let mut views_vec: [&AccountView; 22] = [&accounts[0]; 22]; // max: 14 fixed + 8 bin arrays
+    let mut vi = 0;
+    views_vec[vi] = &accounts[0]; vi += 1;  // lb_pair
+    // skip accounts[1] = bitmap_ext
+    views_vec[vi] = &accounts[2]; vi += 1;  // reserve_x
+    views_vec[vi] = &accounts[3]; vi += 1;  // reserve_y
+    if total > 4 { views_vec[vi] = &accounts[4]; vi += 1; }  // user_token_in
+    if total > 5 { views_vec[vi] = &accounts[5]; vi += 1; }  // user_token_out
+    if total > 6 { views_vec[vi] = &accounts[6]; vi += 1; }  // token_x_mint
+    if total > 7 { views_vec[vi] = &accounts[7]; vi += 1; }  // token_y_mint
+    if total > 8 { views_vec[vi] = &accounts[8]; vi += 1; }  // oracle
+    // skip accounts[9] = host_fee_in
+    if total > 10 { views_vec[vi] = &accounts[10]; vi += 1; } // user (signer)
+    if total > 11 { views_vec[vi] = &accounts[11]; vi += 1; } // token_x_program
+    if total > 12 { views_vec[vi] = &accounts[12]; vi += 1; } // token_y_program
+    if total > 13 { views_vec[vi] = &accounts[13]; vi += 1; } // memo_program
+    if total > 14 { views_vec[vi] = &accounts[14]; vi += 1; } // event_authority
+    if total > 15 { views_vec[vi] = &accounts[15]; vi += 1; } // program
+    // bin arrays
+    let mut bi = bin_array_start;
+    while bi < total {
+        views_vec[vi] = &accounts[bi]; vi += 1; bi += 1;
+    }
 
-    invoke_signed_with_slice(&instruction, &views[..total], &[])
+    invoke_signed_with_slice(&instruction, &views_vec[..vi], &[])
 }
 
 /// Meteora DAMM V2: swap (14 accounts).

@@ -837,21 +837,17 @@ impl TxBuilder {
                 let oracle = extra.first().copied().unwrap_or_default();
                 let token_x_prog = if snap.mint_a_is_2022 { TOKEN_2022_PROGRAM_ID } else { SPL_TOKEN_PROGRAM_ID };
                 let token_y_prog = if snap.mint_b_is_2022 { TOKEN_2022_PROGRAM_ID } else { SPL_TOKEN_PROGRAM_ID };
-                // bin_array_bitmap_extension PDA: ["bitmap", lb_pair]
-                let (bitmap_ext, _) = Pubkey::find_program_address(
-                    &[b"bitmap", pool.as_ref()],
-                    &METEORA_DLMM_PROGRAM,
-                );
-                // host_fee_in: use user_token_in as placeholder (DLMM skips if no host)
-                let host_fee_in = user_input_ata;
-                // event_authority PDA: ["__event_authority"]
+                // bin_array_bitmap_extension and host_fee_in are optional accounts.
+                // DLMM program checks if they're initialized — passing an uninitialized PDA
+                // causes 0xbc4 (AccountNotInitialized). Use DLMM program_id as placeholder
+                // in AccountMeta (the account_infos skip them, matching reference impl).
                 let (event_authority, _) = Pubkey::find_program_address(
                     &[b"__event_authority"],
                     &METEORA_DLMM_PROGRAM,
                 );
                 let mut metas = vec![
                     AccountMeta::new(pool, false),                              // [0] lb_pair
-                    AccountMeta::new_readonly(bitmap_ext, false),                // [1] bin_array_bitmap_extension
+                    AccountMeta::new_readonly(METEORA_DLMM_PROGRAM, false),     // [1] bin_array_bitmap_extension (placeholder)
                     AccountMeta::new(vault_a.unwrap_or_default(), false),        // [2] reserve_x
                     AccountMeta::new(vault_b.unwrap_or_default(), false),        // [3] reserve_y
                     AccountMeta::new(user_input_ata, false),                     // [4] user_token_in
@@ -859,7 +855,7 @@ impl TxBuilder {
                     AccountMeta::new_readonly(snap.mint_a, false),               // [6] token_x_mint
                     AccountMeta::new_readonly(snap.mint_b, false),               // [7] token_y_mint
                     AccountMeta::new(oracle, false),                             // [8] oracle
-                    AccountMeta::new(host_fee_in, false),                        // [9] host_fee_in
+                    AccountMeta::new_readonly(METEORA_DLMM_PROGRAM, false),     // [9] host_fee_in (placeholder)
                     AccountMeta::new_readonly(self.payer_pubkey, true),           // [10] user
                     AccountMeta::new_readonly(token_x_prog, false),              // [11] token_x_program
                     AccountMeta::new_readonly(token_y_prog, false),              // [12] token_y_program
