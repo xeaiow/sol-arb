@@ -220,6 +220,11 @@ fn clmm_get_amount_out(
         return 0;
     }
 
+    // No tick arrays loaded — can't bound the quote, would produce infinite-range garbage
+    if tick_arrays.is_empty() {
+        return 0;
+    }
+
     let q64 = (1u128 << 64) as f64;
     let mut sqrt_price = sqrt_price_x64 as f64 / q64;
     let mut liq = liquidity as f64;
