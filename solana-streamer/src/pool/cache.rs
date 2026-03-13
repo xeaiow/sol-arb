@@ -1,3 +1,4 @@
+use std::sync::Arc;
 use dashmap::DashMap;
 use solana_sdk::pubkey::Pubkey;
 use tokio::sync::mpsc;
@@ -22,17 +23,20 @@ pub struct PoolStateCache {
     update_tx: mpsc::Sender<PoolUpdate>,
     /// Queue of CLMM pools that need tick array reload
     tick_reload_queue: tokio::sync::Mutex<Vec<TickArrayReloadRequest>>,
+    /// Notify: CLMM pools need tick array reload
+    tick_reload_notify: Arc<tokio::sync::Notify>,
 }
 
 impl PoolStateCache {
     /// Create a new cache that emits updates on the given channel.
-    pub fn new(update_tx: mpsc::Sender<PoolUpdate>) -> Self {
+    pub fn new(update_tx: mpsc::Sender<PoolUpdate>, tick_reload_notify: Arc<tokio::sync::Notify>) -> Self {
         Self {
             pools: DashMap::new(),
             vault_to_pool: DashMap::new(),
             tick_array_to_pool: DashMap::new(),
             update_tx,
             tick_reload_queue: tokio::sync::Mutex::new(Vec::new()),
+            tick_reload_notify,
         }
     }
 
@@ -156,6 +160,7 @@ impl PoolStateCache {
                                 tick_current: *tick_current,
                                 tick_spacing: *tick_spacing,
                             });
+                            self.tick_reload_notify.notify_one();
                         }
                     }
                 }

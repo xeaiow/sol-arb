@@ -5,7 +5,7 @@ use log::{info, debug};
 use solana_client::nonblocking::rpc_client::RpcClient;
 use solana_sdk::hash::Hash;
 use solana_sdk::pubkey::Pubkey;
-use tokio::sync::mpsc;
+use tokio::sync::{mpsc, Notify};
 
 use crate::streaming::event_parser::DexEvent;
 use super::cache::PoolStateCache;
@@ -55,12 +55,19 @@ pub struct PoolStreamer {
     latest_blockhash_slot: Arc<AtomicU64>,
     /// Cached PumpSwap GlobalConfig fee rates
     pumpswap_fees: tokio::sync::OnceCell<PumpSwapFees>,
+    /// Notify: new accounts pending gRPC subscription
+    subscription_notify: Arc<Notify>,
+    /// Notify: new vaults pending initial balance fetch
+    vault_notify: Arc<Notify>,
+    /// Notify: CLMM pools need tick array reload
+    tick_reload_notify: Arc<Notify>,
 }
 
 impl PoolStreamer {
     pub fn new(config: PoolStreamerConfig) -> (Self, mpsc::Receiver<PoolUpdate>) {
         let (update_tx, update_rx) = mpsc::channel(config.update_channel_size);
-        let cache = Arc::new(PoolStateCache::new(update_tx));
+        let tick_reload_notify = Arc::new(Notify::new());
+        let cache = Arc::new(PoolStateCache::new(update_tx, tick_reload_notify.clone()));
         let rpc = Arc::new(RpcClient::new(config.rpc_url));
 
         let streamer = Self {
@@ -72,6 +79,9 @@ impl PoolStreamer {
             latest_blockhash: Arc::new(tokio::sync::RwLock::new(None)),
             latest_blockhash_slot: Arc::new(AtomicU64::new(0)),
             pumpswap_fees: tokio::sync::OnceCell::new(),
+            subscription_notify: Arc::new(Notify::new()),
+            vault_notify: Arc::new(Notify::new()),
+            tick_reload_notify,
         };
 
         (streamer, update_rx)
@@ -79,6 +89,18 @@ impl PoolStreamer {
 
     pub fn cache(&self) -> Arc<PoolStateCache> {
         self.cache.clone()
+    }
+
+    pub fn subscription_notify(&self) -> Arc<Notify> {
+        self.subscription_notify.clone()
+    }
+
+    pub fn vault_notify(&self) -> Arc<Notify> {
+        self.vault_notify.clone()
+    }
+
+    pub fn tick_reload_notify(&self) -> Arc<Notify> {
+        self.tick_reload_notify.clone()
     }
 
     /// Process a DexEvent — handles discovery, state updates, and vault balance updates
@@ -143,6 +165,7 @@ impl PoolStreamer {
         }
 
         self.pending_discoveries.insert(discovered.address, discovered);
+        self.subscription_notify.notify_one();
     }
 
     /// Handle a pool account update from gRPC.
@@ -195,6 +218,7 @@ impl PoolStreamer {
                 pending.push(vault_b.to_string());
             }
         }
+        self.subscription_notify.notify_one();
 
         info!(
             "Pool registered: {} {:?} ({} / {})",
@@ -232,6 +256,7 @@ impl PoolStreamer {
                 pending.push(PendingVault { vault: vb, is_vault_a: false });
             }
         }
+        self.vault_notify.notify_one();
     }
 
     fn handle_token_account_update(&self, token_account: &Pubkey, balance: u64, slot: u64) {
