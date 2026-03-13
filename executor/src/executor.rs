@@ -1,6 +1,8 @@
 use std::sync::Arc;
 use log::{info, debug, warn};
 use solana_client::nonblocking::rpc_client::RpcClient;
+use solana_client::rpc_config::RpcSimulateTransactionConfig;
+use solana_commitment_config::CommitmentConfig;
 use solana_sdk::hash::Hash;
 use solana_sdk::signer::{keypair::Keypair, Signer};
 use tokio::sync::mpsc;
@@ -205,6 +207,44 @@ impl Executor {
             // Skip if no tx was built (e.g. cross-hop conflict)
             if pair.jito_tx.is_none() && pair.swqos_tx.is_none() {
                 continue;
+            }
+
+            // Simulate before sending — filter out false opportunities
+            {
+                let sim_tx = pair.swqos_tx.as_ref().or(pair.jito_tx.as_ref());
+                if let Some(tx) = sim_tx {
+                    let sim_config = RpcSimulateTransactionConfig {
+                        sig_verify: false,
+                        replace_recent_blockhash: true,
+                        commitment: Some(CommitmentConfig::processed()),
+                        ..Default::default()
+                    };
+                    match self.rpc.simulate_transaction_with_config(tx, sim_config).await {
+                        Ok(sim_result) => {
+                            if let Some(err) = sim_result.value.err {
+                                info!(
+                                    "[SIMULATE] FAIL: {} | engine_profit={:.6} SOL | {} hops slot={} → skipped",
+                                    err,
+                                    opp.expected_profit as f64 / 1e9,
+                                    opp.route.hops.len(),
+                                    opp.slot,
+                                );
+                                continue;
+                            }
+                            let cu_used = sim_result.value.units_consumed.unwrap_or(0);
+                            info!(
+                                "[SIMULATE] PASS: engine_profit={:.6} SOL, CU={} | {} hops slot={} → sending",
+                                opp.expected_profit as f64 / 1e9,
+                                cu_used,
+                                opp.route.hops.len(),
+                                opp.slot,
+                            );
+                        }
+                        Err(e) => {
+                            warn!("[SIMULATE] RPC error: {} — sending anyway", e);
+                        }
+                    }
+                }
             }
 
             // Test mode: send and wait, then exit
