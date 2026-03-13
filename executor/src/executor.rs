@@ -242,6 +242,12 @@ impl Executor {
                             if let Some(err) = sim_result.value.err {
                                 let dex_types: Vec<String> = opp.pool_snapshots.iter()
                                     .map(|s| format!("{:?}", s.dex_type)).collect();
+                                // Print program logs for debugging CPI errors
+                                if let Some(ref logs) = sim_result.value.logs {
+                                    for log in logs.iter().rev().take(10).collect::<Vec<_>>().into_iter().rev() {
+                                        debug!("[SIM_LOG] {}", log);
+                                    }
+                                }
                                 info!(
                                     "[SIMULATE] FAIL: {} | engine_profit={:.6} SOL | {} hops slot={} dexes=[{}] → skipped",
                                     err,
