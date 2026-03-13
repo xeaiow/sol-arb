@@ -537,14 +537,7 @@ impl PoolStreamer {
                 let reload_slot = self.cache.get(&req.pool_address)
                     .map(|p| p.last_updated_slot)
                     .unwrap_or(1);
-                self.cache.replace_bin_arrays(&req.pool_address, new_bin_arrays, reload_slot);
-
-                // Update extra_accounts with only existing bin arrays
-                if let Some(mut pool) = self.cache.get(&req.pool_address).map(|p| p.clone()) {
-                    pool.extra_accounts = new_extra;
-                    // Re-insert to update extra_accounts (update_math doesn't touch extra_accounts)
-                    // We emit a PoolUpdate via replace_bin_arrays above already
-                }
+                self.cache.replace_bin_arrays(&req.pool_address, new_bin_arrays, new_extra, reload_slot);
             }
         }
     }

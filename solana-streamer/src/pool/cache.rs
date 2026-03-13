@@ -466,13 +466,16 @@ impl PoolStateCache {
     }
 
     /// Replace all bin arrays for a DLMM pool and emit a PoolUpdate.
-    pub fn replace_bin_arrays(&self, address: &Pubkey, new_bin_arrays: Vec<DlmmBinArray>, slot: u64) {
+    /// `new_extra_pdas` = [oracle, existing_bin_array_pda_1, ...] — only includes PDAs that exist on-chain.
+    pub fn replace_bin_arrays(&self, address: &Pubkey, new_bin_arrays: Vec<DlmmBinArray>, new_extra_pdas: Vec<Pubkey>, slot: u64) {
         if let Some(mut pool) = self.pools.get_mut(address) {
             if let PoolMath::MeteoraDlmm { ref mut bin_arrays, .. } = pool.math {
                 *bin_arrays = new_bin_arrays;
             }
 
             if matches!(pool.math, PoolMath::MeteoraDlmm { .. }) {
+                // Update extra_accounts with only existing bin array PDAs
+                pool.extra_accounts = new_extra_pdas;
                 pool.last_updated_slot = slot;
 
                 let update = PoolUpdate {

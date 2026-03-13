@@ -315,6 +315,9 @@ fn swap_pumpswap(accounts: &[AccountView], is_a_to_b: bool, amount_in: u64) -> P
         };
         dex_pinocchio_cpi::pump_fun_amm::buy(&buy_accounts, &args, &[])
     } else {
+        // Off-chain always sends 23 accounts in Buy layout.
+        // Sell has no volume accumulators — [19],[20] are unused padding.
+        // fee_config=[21], fee_program=[22] (same positions as Buy).
         let sell_accounts = dex_pinocchio_cpi::pump_fun_amm::SellAccounts {
             pool: &accounts[0],
             user: &accounts[1],
@@ -335,8 +338,8 @@ fn swap_pumpswap(accounts: &[AccountView], is_a_to_b: bool, amount_in: u64) -> P
             program: &accounts[16],
             coin_creator_vault_ata: &accounts[17],
             coin_creator_vault_authority: &accounts[18],
-            fee_config: &accounts[19],
-            fee_program: &accounts[20],
+            fee_config: &accounts[21],
+            fee_program: &accounts[22],
         };
         let args = dex_pinocchio_cpi::pump_fun_amm::SellArgs {
             base_amount_in: amount_in,
