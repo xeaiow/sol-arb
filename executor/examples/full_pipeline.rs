@@ -194,20 +194,29 @@ async fn main() -> anyhow::Result<()> {
                 added, cumulative_accounts.len()
             );
 
-            // Update gRPC subscription with explicit accounts + owner filter
+            // Update gRPC subscription with TWO separate account filters:
+            // 1) owner filter for DEX pool accounts (program-owned)
+            // 2) explicit account filter for vault token accounts (SPL Token owned)
+            // These MUST be separate because Yellowstone gRPC ANDs account+owner
+            // within the same filter — vaults would be filtered out by DEX owner check.
             let tx_filter = TransactionFilter {
                 account_include: sub_program_ids.clone(),
                 account_exclude: vec![],
                 account_required: vec![],
             };
-            let acct_filter = AccountFilter {
-                account: cumulative_accounts.clone(),
+            let owner_filter = AccountFilter {
+                account: vec![],
                 owner: sub_program_ids.clone(),
+                filters: vec![],
+            };
+            let explicit_filter = AccountFilter {
+                account: cumulative_accounts.clone(),
+                owner: vec![],
                 filters: vec![],
             };
             if let Err(e) = sub_grpc.update_subscription(
                 vec![tx_filter],
-                vec![acct_filter],
+                vec![owner_filter, explicit_filter],
             ).await {
                 log::warn!("Failed to update gRPC subscription: {}", e);
             }
