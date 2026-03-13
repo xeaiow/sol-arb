@@ -70,6 +70,17 @@ async fn main() -> anyhow::Result<()> {
                         sqrt_price_x64, liquidity, tick_current
                     );
                 }
+                PoolMath::DammV2Concentrated {
+                    sqrt_price_x64,
+                    liquidity,
+                    ..
+                } => {
+                    println!(
+                        "[slot {}] Pool {} ({:?}) DammV2CL: sqrt_price={}, liquidity={}",
+                        update.slot, update.pool_address, update.dex_type,
+                        sqrt_price_x64, liquidity
+                    );
+                }
                 PoolMath::MeteoraDlmm {
                     active_id,
                     bin_step,

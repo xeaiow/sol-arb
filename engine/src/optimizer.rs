@@ -85,6 +85,17 @@ fn extract_clmm(math: &PoolMath) -> Option<ClmmParams> {
                 limit_in_b: *limit_in_b,
             })
         }
+        PoolMath::DammV2Concentrated { sqrt_price_x64, liquidity, fee_numerator, .. } => {
+            if *liquidity == 0 || *sqrt_price_x64 == 0 { return None; }
+            let q64 = (1u128 << 64) as f64;
+            Some(ClmmParams {
+                sqrt_price: *sqrt_price_x64 as f64 / q64,
+                liquidity: *liquidity as f64,
+                fee_factor: 1.0 - (*fee_numerator as f64 / 1_000_000_000.0),
+                limit_in_a: u64::MAX, // single-range CL, no tick boundary limits
+                limit_in_b: u64::MAX,
+            })
+        }
         _ => None,
     }
 }
@@ -362,18 +373,19 @@ fn try_closed_form(
             closed_form_cp_cp(&p1, &p2)
         }
         (PoolMath::ConstantProduct { .. } | PoolMath::BondingCurve { .. },
-         PoolMath::Concentrated { .. }) => {
+         PoolMath::Concentrated { .. } | PoolMath::DammV2Concentrated { .. }) => {
             let p1 = extract_cp(&pool1.math, hop1.is_a_to_b)?;
             let p2 = extract_clmm(&pool2.math)?;
             closed_form_cp_clmm(&p1, &p2, hop2.is_a_to_b)
         }
-        (PoolMath::Concentrated { .. },
+        (PoolMath::Concentrated { .. } | PoolMath::DammV2Concentrated { .. },
          PoolMath::ConstantProduct { .. } | PoolMath::BondingCurve { .. }) => {
             let p1 = extract_clmm(&pool1.math)?;
             let p2 = extract_cp(&pool2.math, hop2.is_a_to_b)?;
             closed_form_clmm_cp(&p1, &p2, hop1.is_a_to_b)
         }
-        (PoolMath::Concentrated { .. }, PoolMath::Concentrated { .. }) => {
+        (PoolMath::Concentrated { .. } | PoolMath::DammV2Concentrated { .. },
+         PoolMath::Concentrated { .. } | PoolMath::DammV2Concentrated { .. }) => {
             let p1 = extract_clmm(&pool1.math)?;
             let p2 = extract_clmm(&pool2.math)?;
             closed_form_clmm_clmm(&p1, &p2, hop1.is_a_to_b, hop2.is_a_to_b)

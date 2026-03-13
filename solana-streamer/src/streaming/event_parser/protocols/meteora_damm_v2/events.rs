@@ -421,6 +421,12 @@ pub struct MeteoraDammV2PoolStateAccountEvent {
     pub token_b_flag: u8,
     pub pool_status: u8,
     pub cliff_fee_numerator: u64,
+    // Concentrated liquidity fields
+    pub liquidity: u128,
+    pub sqrt_min_price: u128,
+    pub sqrt_max_price: u128,
+    pub sqrt_price: u128,
+    pub collect_fee_mode: u8,
 }
 
 /// Pool account discriminator

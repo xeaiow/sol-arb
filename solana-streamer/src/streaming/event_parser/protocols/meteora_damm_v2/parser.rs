@@ -476,10 +476,22 @@ pub fn parse_meteora_damm_v2_account_data(
     let token_a_vault = Pubkey::try_from(&data[232..264]).ok()?;
     let token_b_vault = Pubkey::try_from(&data[264..296]).ok()?;
 
+    // Read CL fields (verified byte offsets from DAMM V2 pool struct)
+    // liquidity: u128 at offset 368 (alignment-padded)
+    let liquidity = u128::from_le_bytes(data[368..384].try_into().ok()?);
+    // sqrt_min_price: u128 at offset 424
+    let sqrt_min_price = u128::from_le_bytes(data[424..440].try_into().ok()?);
+    // sqrt_max_price: u128 at offset 440
+    let sqrt_max_price = u128::from_le_bytes(data[440..456].try_into().ok()?);
+    // sqrt_price: u128 at offset 456
+    let sqrt_price = u128::from_le_bytes(data[456..472].try_into().ok()?);
+
     // Read flags
     let pool_status = data[481];
     let token_a_flag = data[482];
     let token_b_flag = data[483];
+    // collect_fee_mode: u8 at offset 484
+    let collect_fee_mode = data[484];
 
     Some(DexEvent::MeteoraDammV2PoolStateAccountEvent(
         MeteoraDammV2PoolStateAccountEvent {
@@ -493,6 +505,11 @@ pub fn parse_meteora_damm_v2_account_data(
             token_b_flag,
             pool_status,
             cliff_fee_numerator,
+            liquidity,
+            sqrt_min_price,
+            sqrt_max_price,
+            sqrt_price,
+            collect_fee_mode,
         },
     ))
 }

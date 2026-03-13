@@ -172,6 +172,13 @@ impl PoolStateCache {
                     fee_denominator: *existing_fd,
                 }
             } else if let (
+                PoolMath::DammV2Concentrated { .. },
+                PoolMath::DammV2Concentrated { .. },
+            ) = (&pool.math, &math) {
+                // DAMM V2 CL: the full pool account is re-decoded on each gRPC update,
+                // so all fields (sqrt_price, liquidity, etc.) come fresh. Just use new math.
+                math
+            } else if let (
                 PoolMath::MeteoraDlmm {
                     bin_arrays: ref existing_ba,
                     active_id: old_active_id,

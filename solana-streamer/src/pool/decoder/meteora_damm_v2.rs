@@ -3,9 +3,6 @@ use solana_sdk::pubkey::Pubkey;
 use crate::pool::state::{DexType, PoolMath, PoolState};
 use crate::streaming::event_parser::protocols::meteora_damm_v2::events::MeteoraDammV2PoolStateAccountEvent;
 
-/// Fee denominator for Meteora DAMM V2 (cliff_fee_numerator / FEE_DENOMINATOR = fee rate)
-const FEE_DENOMINATOR: u64 = 1_000_000_000;
-
 /// Decode from a parsed account event
 pub fn decode(event: &MeteoraDammV2PoolStateAccountEvent) -> Option<PoolState> {
     Some(PoolState {
@@ -18,11 +15,13 @@ pub fn decode(event: &MeteoraDammV2PoolStateAccountEvent) -> Option<PoolState> {
         mint_a_is_2022: (event.token_a_flag & 1) != 0,
         mint_b_is_2022: (event.token_b_flag & 1) != 0,
         extra_accounts: vec![],
-        math: PoolMath::ConstantProduct {
-            reserve_a: 0,
-            reserve_b: 0,
+        math: PoolMath::DammV2Concentrated {
+            sqrt_price_x64: event.sqrt_price,
+            sqrt_min_price_x64: event.sqrt_min_price,
+            sqrt_max_price_x64: event.sqrt_max_price,
+            liquidity: event.liquidity,
             fee_numerator: event.cliff_fee_numerator,
-            fee_denominator: FEE_DENOMINATOR,
+            collect_fee_mode: event.collect_fee_mode,
         },
         last_updated_slot: event.metadata.slot,
     })
@@ -38,13 +37,18 @@ pub fn decode(event: &MeteoraDammV2PoolStateAccountEvent) -> Option<PoolState> {
 ///   token_a_vault: Pubkey (32)  offset 232
 ///   token_b_vault: Pubkey (32)  offset 264
 ///   ...
+///   liquidity:     u128         offset 368 (alignment-padded)
+///   sqrt_min_price:u128         offset 424
+///   sqrt_max_price:u128         offset 440
+///   sqrt_price:    u128         offset 456
 ///   pool_status:   u8           offset 481
 ///   token_a_flag:  u8           offset 482
 ///   token_b_flag:  u8           offset 483
+///   collect_fee_mode: u8        offset 484
 ///
-/// Total minimum: 8 + 484 = 492 bytes (up to token_b_flag)
+/// Total minimum: 485 bytes
 pub fn decode_bytes(address: &Pubkey, data: &[u8]) -> Option<PoolState> {
-    if data.len() < 484 {
+    if data.len() < 485 {
         return None;
     }
 
@@ -56,8 +60,15 @@ pub fn decode_bytes(address: &Pubkey, data: &[u8]) -> Option<PoolState> {
     let a_vault = Pubkey::try_from(&data[232..264]).ok()?;
     let b_vault = Pubkey::try_from(&data[264..296]).ok()?;
 
+    // CL fields
+    let liquidity = u128::from_le_bytes(data[368..384].try_into().ok()?);
+    let sqrt_min_price = u128::from_le_bytes(data[424..440].try_into().ok()?);
+    let sqrt_max_price = u128::from_le_bytes(data[440..456].try_into().ok()?);
+    let sqrt_price = u128::from_le_bytes(data[456..472].try_into().ok()?);
+
     let token_a_flag = data[482];
     let token_b_flag = data[483];
+    let collect_fee_mode = data[484];
 
     Some(PoolState {
         address: *address,
@@ -69,11 +80,13 @@ pub fn decode_bytes(address: &Pubkey, data: &[u8]) -> Option<PoolState> {
         mint_a_is_2022: (token_a_flag & 1) != 0,
         mint_b_is_2022: (token_b_flag & 1) != 0,
         extra_accounts: vec![],
-        math: PoolMath::ConstantProduct {
-            reserve_a: 0,
-            reserve_b: 0,
+        math: PoolMath::DammV2Concentrated {
+            sqrt_price_x64: sqrt_price,
+            sqrt_min_price_x64: sqrt_min_price,
+            sqrt_max_price_x64: sqrt_max_price,
+            liquidity,
             fee_numerator: cliff_fee_numerator,
-            fee_denominator: FEE_DENOMINATOR,
+            collect_fee_mode,
         },
         last_updated_slot: 0,
     })
@@ -97,12 +110,22 @@ mod tests {
         data[232..264].copy_from_slice(&[3u8; 32]);
         // token_b_vault
         data[264..296].copy_from_slice(&[4u8; 32]);
+        // liquidity (u128 at offset 368)
+        data[368..384].copy_from_slice(&1_000_000_000u128.to_le_bytes());
+        // sqrt_min_price (u128 at offset 424)
+        data[424..440].copy_from_slice(&100u128.to_le_bytes());
+        // sqrt_max_price (u128 at offset 440)
+        data[440..456].copy_from_slice(&999_999_999u128.to_le_bytes());
+        // sqrt_price (u128 at offset 456)
+        data[456..472].copy_from_slice(&500_000_000u128.to_le_bytes());
         // pool_status = 0 (enabled)
         data[481] = 0;
         // token_a_flag = 0 (SPL Token)
         data[482] = 0;
         // token_b_flag = 1 (Token-2022)
         data[483] = 1;
+        // collect_fee_mode = 0 (BothToken)
+        data[484] = 0;
         data
     }
 
@@ -122,18 +145,22 @@ mod tests {
         assert!(pool.mint_b_is_2022);
 
         match pool.math {
-            PoolMath::ConstantProduct {
-                reserve_a,
-                reserve_b,
+            PoolMath::DammV2Concentrated {
+                sqrt_price_x64,
+                sqrt_min_price_x64,
+                sqrt_max_price_x64,
+                liquidity,
                 fee_numerator,
-                fee_denominator,
+                collect_fee_mode,
             } => {
-                assert_eq!(reserve_a, 0);
-                assert_eq!(reserve_b, 0);
+                assert_eq!(sqrt_price_x64, 500_000_000);
+                assert_eq!(sqrt_min_price_x64, 100);
+                assert_eq!(sqrt_max_price_x64, 999_999_999);
+                assert_eq!(liquidity, 1_000_000_000);
                 assert_eq!(fee_numerator, 2_500_000);
-                assert_eq!(fee_denominator, 1_000_000_000);
+                assert_eq!(collect_fee_mode, 0);
             }
-            _ => panic!("Expected ConstantProduct math"),
+            _ => panic!("Expected DammV2Concentrated math"),
         }
     }
 

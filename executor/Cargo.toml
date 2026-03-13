@@ -29,5 +29,9 @@ bs58 = "0.5"
 base64 = "0.22"
 solana-account-decoder = "3.1.9"
 
+[[bin]]
+name = "verify_damm_v2"
+path = "src/bin/verify_damm_v2.rs"
+
 [build-dependencies]
 tonic-build = "0.12"

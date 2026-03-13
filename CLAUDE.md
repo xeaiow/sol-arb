@@ -203,7 +203,7 @@ RPC endpoint: 用 config.toml 中的 `rpc_url`，或 fallback 到 `https://mainn
 4. PumpFun — BondingCurve
 5. PumpSwap — ConstantProduct
 6. BonkSwap — ConstantProduct
-7. Meteora DAMM V2 — ConstantProduct
+7. Meteora DAMM V2 — DammV2Concentrated（Uniswap V3 風格 single-range CL，sqrt-price 數學）
 8. Meteora DLMM — ConstantProduct（bin-based，用 vault balance 近似報價）
 9. Orca Whirlpool — Concentrated（tick-based CLMM，與 Raydium CLMM 共用數學模型）
 

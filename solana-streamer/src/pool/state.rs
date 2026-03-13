@@ -47,7 +47,7 @@ pub enum DexType {
 /// Pool pricing math — off-chain only, f64 fast-path
 #[derive(Debug, Clone)]
 pub enum PoolMath {
-    /// x * y = k (Raydium AMM V4/CPMM, PumpSwap, Bonk, Meteora DAMM v2)
+    /// x * y = k (Raydium AMM V4/CPMM, PumpSwap, Bonk)
     ConstantProduct {
         reserve_a: u64,
         reserve_b: u64,
@@ -78,6 +78,18 @@ pub enum PoolMath {
         real_token_reserves: u64,
         real_sol_reserves: u64,
         complete: bool,
+    },
+
+    /// Concentrated liquidity (Meteora DAMM V2)
+    /// Uniswap V3-style single-range CL with sqrt-price math.
+    DammV2Concentrated {
+        sqrt_price_x64: u128,
+        sqrt_min_price_x64: u128,
+        sqrt_max_price_x64: u128,
+        liquidity: u128,
+        fee_numerator: u64,
+        /// 0=BothToken (fee on output), 2=Compounding (CP-like, uses token_a/b_amount)
+        collect_fee_mode: u8,
     },
 
     /// Bin-based constant-sum (Meteora DLMM)
@@ -167,6 +179,28 @@ impl PoolMath {
                     *tick_spacing,
                     *fee_rate,
                     tick_arrays,
+                )
+            }
+            PoolMath::DammV2Concentrated {
+                sqrt_price_x64,
+                sqrt_min_price_x64,
+                sqrt_max_price_x64,
+                liquidity,
+                fee_numerator,
+                collect_fee_mode,
+            } => {
+                if *liquidity == 0 || *sqrt_price_x64 == 0 {
+                    return 0;
+                }
+                damm_v2_get_amount_out(
+                    amount_in,
+                    is_a_to_b,
+                    *sqrt_price_x64,
+                    *sqrt_min_price_x64,
+                    *sqrt_max_price_x64,
+                    *liquidity,
+                    *fee_numerator,
+                    *collect_fee_mode,
                 )
             }
             PoolMath::MeteoraDlmm {
@@ -347,6 +381,69 @@ fn clmm_get_amount_out(
     // over-quoting that leads to simulate failures.
     let out = amount_out * 0.997;
     out.max(0.0) as u64
+}
+
+/// Meteora DAMM V2 concentrated liquidity quote (f64 fast-path).
+///
+/// Single-range CL with sqrt-price math (Uniswap V3 style, one position).
+/// Formulas (real f64 values, sp = sqrt_price / 2^64, L = liquidity raw):
+///   A→B: next_sp = L*sp / (L + amt*sp), output = L*(sp - next_sp)
+///   B→A: next_sp = sp + amt/L, output = L*(1/sp - 1/next_sp)
+/// Fee: applied on output for collect_fee_mode=0 (BothToken).
+#[allow(clippy::too_many_arguments)]
+fn damm_v2_get_amount_out(
+    amount_in: u64,
+    is_a_to_b: bool,
+    sqrt_price_x64: u128,
+    sqrt_min_price_x64: u128,
+    sqrt_max_price_x64: u128,
+    liquidity: u128,
+    fee_numerator: u64,
+    collect_fee_mode: u8,
+) -> u64 {
+    let q64 = (1u128 << 64) as f64;
+    let sp = sqrt_price_x64 as f64 / q64;
+    let sp_min = sqrt_min_price_x64 as f64 / q64;
+    let sp_max = sqrt_max_price_x64 as f64 / q64;
+    let l = liquidity as f64;
+
+    if sp <= 0.0 || l <= 0.0 {
+        return 0;
+    }
+
+    let fee_rate = fee_numerator as f64 / 1_000_000_000.0;
+    let amt = amount_in as f64;
+
+    let output = if is_a_to_b {
+        // A→B: price decreases
+        let next_sp = (l * sp / (l + amt * sp)).max(sp_min);
+        l * (sp - next_sp)
+    } else {
+        // B→A: price increases
+        let next_sp = (sp + amt / l).min(sp_max);
+        l * (1.0 / sp - 1.0 / next_sp)
+    };
+
+    // Fee on output (collect_fee_mode=0 BothToken is fee-on-output)
+    let output_after_fee = if collect_fee_mode == 2 {
+        // Compounding mode: fee on input
+        let amt_after_fee = amt * (1.0 - fee_rate);
+        // Recompute with reduced input
+        let recalc = if is_a_to_b {
+            let next_sp = (l * sp / (l + amt_after_fee * sp)).max(sp_min);
+            l * (sp - next_sp)
+        } else {
+            let next_sp = (sp + amt_after_fee / l).min(sp_max);
+            l * (1.0 / sp - 1.0 / next_sp)
+        };
+        recalc
+    } else {
+        output * (1.0 - fee_rate)
+    };
+
+    // Apply 0.3% haircut for f64 precision loss (same as CLMM)
+    let result = output_after_fee * 0.997;
+    result.max(0.0) as u64
 }
 
 /// DLMM bin-level constant-sum quote (f64 fast-path).
