@@ -128,6 +128,15 @@ impl PoolMath {
                 }
                 let fee = *fee_numerator as f64 / *fee_denominator as f64;
                 let amt = amount_in as f64 * (1.0 - fee);
+                // Guard: PumpSwap computes amt_after_fee * reserve in u64 on-chain.
+                // If the intermediate product overflows u64, the tx will revert
+                // with Overflow (0x1787). Skip these trades off-chain.
+                let (ri, ro) = if is_a_to_b { (*reserve_a, *reserve_b) } else { (*reserve_b, *reserve_a) };
+                let amt_u64 = amt as u64;
+                if (amt_u64 as u128).checked_mul(ro as u128).map_or(true, |v| v > u64::MAX as u128) {
+                    return 0;
+                }
+                let _ = ri; // suppress unused warning
                 let out = (r_out * amt) / (r_in + amt);
                 out as u64
             }

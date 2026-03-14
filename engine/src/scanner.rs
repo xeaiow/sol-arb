@@ -352,6 +352,21 @@ impl Scanner {
             }
         }
 
+        // [DEBUG_QUOTE_LOG] Log per-hop expected quotes for diagnosing simulate failures
+        {
+            let mut carry = amount_in;
+            for (i, hop) in route.hops.iter().enumerate() {
+                let pool = &self.graph.pools[hop.pool_index as usize];
+                let out = pool.math.get_amount_out(carry, hop.is_a_to_b);
+                info!(
+                    "[QUOTE] hop={} pool={} dex={:?} a_to_b={} in={} out={} slot={}",
+                    i, &pool.address.to_string()[..8], pool.dex_type, hop.is_a_to_b,
+                    carry, out, pool.last_updated_slot,
+                );
+                carry = out;
+            }
+        }
+
         for hop in &route.hops {
             let pool = &self.graph.pools[hop.pool_index as usize];
             if pool.last_updated_slot > max_slot {

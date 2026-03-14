@@ -8,7 +8,6 @@
 
 use std::collections::HashSet;
 use std::sync::Arc;
-use std::sync::atomic::Ordering;
 
 use arb_engine::engine::Engine;
 use arb_executor::config::ExecutorConfigFile;
@@ -93,7 +92,7 @@ async fn main() -> anyhow::Result<()> {
     let (pool_streamer, update_rx) = PoolStreamer::new(streamer_config);
     let pool_streamer = Arc::new(pool_streamer);
     let sub_notify = pool_streamer.subscription_notify();
-    let sub_dirty = pool_streamer.subscription_dirty();
+    let _sub_dirty = pool_streamer.subscription_dirty();
     let vault_notify = pool_streamer.vault_notify();
     let tick_notify = pool_streamer.tick_reload_notify();
     eprintln!("Stage 1 (PoolStreamer) ready");
