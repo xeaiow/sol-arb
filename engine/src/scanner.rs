@@ -53,7 +53,14 @@ fn max_stale_slots(pool: &PoolEntry) -> u64 {
         PoolMath::DammV2Concentrated { liquidity, .. } => {
             (*liquidity / 1_000_000) as u64
         }
-        PoolMath::MeteoraDlmm { .. } => 0,
+        PoolMath::MeteoraDlmm { bin_arrays, .. } => {
+            // Estimate SOL reserve from bin liquidity (one side is likely SOL)
+            let total: u64 = bin_arrays.iter()
+                .flat_map(|ba| ba.bins.iter())
+                .map(|b| b.amount_x.saturating_add(b.amount_y))
+                .sum();
+            total / 2
+        }
     };
 
     let sol = sol_reserve as f64 / 1e9;
