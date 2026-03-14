@@ -421,31 +421,43 @@ fn damm_v2_get_amount_out(
     }
 
     let fee_rate = fee_numerator as f64 / 1_000_000_000.0;
-    let amt = amount_in as f64;
 
-    let output = if is_a_to_b {
-        // A→B: price decreases
-        let next_sp = (l * sp / (l + amt * sp)).max(sp_min);
-        l * (sp - next_sp)
+    // Apply fee to input first for compounding mode, or use raw amount
+    let amt_raw = amount_in as f64;
+    let amt = if collect_fee_mode == 2 {
+        amt_raw * (1.0 - fee_rate)
     } else {
-        // B→A: price increases
-        let next_sp = (sp + amt / l).min(sp_max);
-        l * (1.0 / sp - 1.0 / next_sp)
+        amt_raw
     };
 
-    // Fee on output (collect_fee_mode=0 BothToken is fee-on-output)
+    // Cap input to what the liquidity range can actually absorb.
+    // Beyond this, the price would hit the boundary and excess input is wasted.
+    // On-chain this causes PriceRangeViolation or produces less output than expected.
+    let (output, saturated) = if is_a_to_b {
+        // A→B: price decreases toward sp_min
+        // Max A that pushes price to sp_min: delta_a = L * (1/sp_min - 1/sp)
+        let max_amt = l * (1.0 / sp_min - 1.0 / sp);
+        let effective_amt = amt.min(max_amt);
+        let next_sp = l * sp / (l + effective_amt * sp);
+        (l * (sp - next_sp), amt > max_amt)
+    } else {
+        // B→A: price increases toward sp_max
+        // Max B that pushes price to sp_max: delta_b = L * (sp_max - sp)
+        let max_amt = l * (sp_max - sp);
+        let effective_amt = amt.min(max_amt);
+        let next_sp = sp + effective_amt / l;
+        (l * (1.0 / sp - 1.0 / next_sp), amt > max_amt)
+    };
+
+    // If input saturates the range, the route is likely unprofitable because
+    // only a fraction of the input is used. Return 0 to avoid phantom profits.
+    if saturated {
+        return 0;
+    }
+
+    // Fee on output for BothToken mode (collect_fee_mode=0)
     let output_after_fee = if collect_fee_mode == 2 {
-        // Compounding mode: fee on input
-        let amt_after_fee = amt * (1.0 - fee_rate);
-        // Recompute with reduced input
-        let recalc = if is_a_to_b {
-            let next_sp = (l * sp / (l + amt_after_fee * sp)).max(sp_min);
-            l * (sp - next_sp)
-        } else {
-            let next_sp = (sp + amt_after_fee / l).min(sp_max);
-            l * (1.0 / sp - 1.0 / next_sp)
-        };
-        recalc
+        output // fee already deducted from input
     } else {
         output * (1.0 - fee_rate)
     };
