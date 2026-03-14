@@ -45,13 +45,20 @@ impl MultiSender {
         let mut astralane_senders = Vec::new();
         if let Some(ast_cfg) = &config.astralane {
             if ast_cfg.enabled {
-                for endpoint in &ast_cfg.endpoints {
+                // Connect all endpoints in parallel — wait for ALL to finish
+                let futs: Vec<_> = ast_cfg.endpoints.iter().map(|endpoint| {
                     let sender = astralane::AstralaneSender::new(endpoint.clone());
-                    match sender.connect(&ast_cfg.api_key).await {
-                        Ok(_) => astralane_senders.push(sender),
-                        Err(e) => warn!("Failed to connect Astralane QUIC {}: {}", endpoint, e),
+                    let api_key = ast_cfg.api_key.clone();
+                    let endpoint = endpoint.clone();
+                    async move {
+                        match sender.connect(&api_key).await {
+                            Ok(_) => Some(sender),
+                            Err(e) => { warn!("Astralane QUIC failed {}: {}", endpoint, e); None }
+                        }
                     }
-                }
+                }).collect();
+                let results = futures::future::join_all(futs).await;
+                astralane_senders = results.into_iter().flatten().collect();
             }
         }
 
