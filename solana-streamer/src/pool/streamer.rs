@@ -215,7 +215,7 @@ impl PoolStreamer {
     /// Handle a pool account update from gRPC.
     /// If this pool is in pending_discoveries, finalize registration.
     /// If already registered, just update math.
-    async fn handle_account_update(&self, mut pool_state: PoolState) {
+    pub async fn handle_account_update(&self, mut pool_state: PoolState) {
         if self.cache.contains(&pool_state.address) {
             // Existing pool — just update math
             self.cache.update_math(
@@ -321,6 +321,43 @@ impl PoolStreamer {
             }
         }
         self.vault_notify.notify_one();
+    }
+
+    /// Lightweight pool registration for bootstrap (gPA bulk load).
+    /// Skips all RPC-intensive operations (tick arrays, bin arrays, AmmConfig, Token-2022 detect).
+    /// Pool is inserted with reserve=0; gRPC will fill in vault balances and tick data later.
+    pub async fn register_pool_lightweight(&self, pool_state: PoolState) {
+        if self.cache.contains(&pool_state.address) {
+            return;
+        }
+        if pool_state.mint_a == Pubkey::default() || pool_state.mint_b == Pubkey::default() {
+            return;
+        }
+
+        // Queue vault token accounts for gRPC subscription
+        {
+            let mut pending = self.pending_subscriptions.lock().await;
+            if let Some(vault_a) = &pool_state.vault_a {
+                pending.push(vault_a.to_string());
+            }
+            if let Some(vault_b) = &pool_state.vault_b {
+                pending.push(vault_b.to_string());
+            }
+        }
+
+        // Insert pool (no tick array, no bin array, no fee fetch)
+        self.cache.insert(pool_state.clone());
+
+        // Queue vault addresses for batch RPC fetch
+        {
+            let mut pending = self.pending_vaults.lock().await;
+            if let Some(va) = pool_state.vault_a {
+                pending.push(PendingVault { vault: va, is_vault_a: true });
+            }
+            if let Some(vb) = pool_state.vault_b {
+                pending.push(PendingVault { vault: vb, is_vault_a: false });
+            }
+        }
     }
 
     fn handle_token_account_update(&self, token_account: &Pubkey, balance: u64, slot: u64) {

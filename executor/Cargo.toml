@@ -32,6 +32,10 @@ astralane-quic-client = { git = "https://github.com/Astralane/astralane-quic-cli
 solana-account-decoder = "3.1.9"
 
 [[bin]]
+name = "test_gpa"
+path = "src/bin/test_gpa.rs"
+
+[[bin]]
 name = "verify_damm_v2"
 path = "src/bin/verify_damm_v2.rs"
 

@@ -35,6 +35,8 @@ pub struct EngineConfigFile {
     pub max_absolute_profit_sol: Option<f64>,
     pub base_mints: Option<Vec<String>>,
     pub enable_staleness_check: Option<bool>,
+    pub enable_gpa_bootstrap: Option<bool>,
+    pub gpa_rpc_url: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]

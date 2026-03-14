@@ -102,6 +102,14 @@ async fn main() -> anyhow::Result<()> {
     eprintln!("Stage 2 (Engine) ready");
 
     // ── Stage 3: Executor ───────────────────────────────────────────────
+    // Extract gPA config before executor_config is moved
+    let gpa_enabled = executor_config.engine.as_ref()
+        .and_then(|e| e.enable_gpa_bootstrap)
+        .unwrap_or(true);
+    let gpa_url = executor_config.engine.as_ref()
+        .and_then(|e| e.gpa_rpc_url.clone())
+        .or_else(|| executor_config.executor.fallback_rpc_url.clone())
+        .unwrap_or_else(|| rpc_url.clone());
     let mut executor = Executor::new(executor_config, opp_rx, payer, &rpc_url).await?;
 
     // Share blockhash from gRPC BlockMeta → Executor (eliminates RPC blockhash polling)
@@ -165,6 +173,15 @@ async fn main() -> anyhow::Result<()> {
         },
     )
     .await?;
+
+    // ── Bootstrap: getProgramAccounts bulk pool loading ──
+    if gpa_enabled {
+        let gpa_streamer = pool_streamer.clone();
+        let gpa_url_clone = gpa_url.clone();
+        tokio::spawn(async move {
+            solana_streamer_sdk::pool::bootstrap::bootstrap_pools(&gpa_streamer, &gpa_url_clone).await;
+        });
+    }
 
     eprintln!("\n=== Pipeline running. Warming up... ===");
     eprintln!("(Press Ctrl-C to stop)\n");
