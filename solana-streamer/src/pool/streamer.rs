@@ -1,5 +1,5 @@
 use std::sync::Arc;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use dashmap::DashMap;
 use log::{info, debug};
 use solana_client::nonblocking::rpc_client::RpcClient;
@@ -57,6 +57,8 @@ pub struct PoolStreamer {
     pumpswap_fees: tokio::sync::OnceCell<PumpSwapFees>,
     /// Notify: new accounts pending gRPC subscription
     subscription_notify: Arc<Notify>,
+    /// Dirty flag: set when new accounts are pushed, cleared after drain
+    subscription_dirty: Arc<AtomicBool>,
     /// Notify: new vaults pending initial balance fetch
     vault_notify: Arc<Notify>,
     /// Notify: CLMM pools need tick array reload
@@ -84,6 +86,7 @@ impl PoolStreamer {
             latest_blockhash_slot: Arc::new(AtomicU64::new(0)),
             pumpswap_fees: tokio::sync::OnceCell::new(),
             subscription_notify: Arc::new(Notify::new()),
+            subscription_dirty: Arc::new(AtomicBool::new(false)),
             vault_notify: Arc::new(Notify::new()),
             tick_reload_notify,
             vault_update_count: AtomicU64::new(0),
@@ -99,6 +102,10 @@ impl PoolStreamer {
 
     pub fn subscription_notify(&self) -> Arc<Notify> {
         self.subscription_notify.clone()
+    }
+
+    pub fn subscription_dirty(&self) -> Arc<AtomicBool> {
+        self.subscription_dirty.clone()
     }
 
     pub fn vault_notify(&self) -> Arc<Notify> {
@@ -199,14 +206,10 @@ impl PoolStreamer {
         debug!("Discovered new pool: {} ({:?}), subscribing via gRPC",
             discovered.address, discovered.dex_type);
 
-        // Subscribe to pool account so gRPC pushes its snapshot
-        {
-            let mut pending = self.pending_subscriptions.lock().await;
-            pending.push(discovered.address.to_string());
-        }
+        // Pool accounts are owned by DEX programs → already covered by owner filter.
+        // No need to add to explicit subscription list.
 
         self.pending_discoveries.insert(discovered.address, discovered);
-        self.subscription_notify.notify_one();
     }
 
     /// Handle a pool account update from gRPC.
@@ -259,7 +262,8 @@ impl PoolStreamer {
                 pending.push(vault_b.to_string());
             }
         }
-        self.subscription_notify.notify_one();
+        self.subscription_dirty.store(true, Ordering::Release);
+        self.subscription_notify.notify_waiters();
 
         info!(
             "Pool registered: {} {:?} ({} / {}) [vaults_tracked: {}]",
@@ -365,9 +369,10 @@ impl PoolStreamer {
         }
 
         // Fetch 3 tick arrays (left, current, right)
+        // Tick arrays are owned by Raydium CLMM program → already covered by owner filter.
+        // Only need to register in cache for reverse lookup, no explicit gRPC subscription.
         let start_indices =
             decoder::raydium_clmm::tick_array_start_indices(tick_current, tick_spacing);
-        let mut pending = self.pending_subscriptions.lock().await;
 
         let mut loaded = 0u32;
         let mut failed = 0u32;
@@ -378,7 +383,6 @@ impl PoolStreamer {
                         if let Some(ta) = decoder::raydium_clmm::decode_tick_array(&ta_data) {
                             tick_arrays.push(ta);
                             self.cache.register_tick_array(pda, *pool_address);
-                            pending.push(pda.to_string());
                             loaded += 1;
                         }
                     }
@@ -412,7 +416,6 @@ impl PoolStreamer {
 
         let start_indices =
             decoder::orca_whirlpool::tick_array_start_indices(tick_current, tick_spacing);
-        let mut pending = self.pending_subscriptions.lock().await;
 
         let mut loaded = 0u32;
         let mut failed = 0u32;
@@ -423,7 +426,6 @@ impl PoolStreamer {
                         if let Some(ta) = decoder::orca_whirlpool::decode_tick_array(&ta_data, tick_spacing) {
                             tick_arrays.push(ta);
                             self.cache.register_tick_array(pda, *pool_address);
-                            pending.push(pda.to_string());
                             loaded += 1;
                         }
                     }
@@ -451,7 +453,6 @@ impl PoolStreamer {
         };
 
         let bin_pdas = decoder::meteora_dlmm::bin_array_pdas_for_swap(pool_address, active_id);
-        let mut pending = self.pending_subscriptions.lock().await;
 
         let mut fetched_arrays = Vec::with_capacity(3);
         let mut existing_pdas = Vec::with_capacity(3);
@@ -465,7 +466,6 @@ impl PoolStreamer {
                         fetched_arrays.push(ba);
                         existing_pdas.push(*pda);
                         self.cache.register_tick_array(*pda, *pool_address);
-                        pending.push(pda.to_string());
                         loaded += 1;
                     }
                 }
@@ -510,7 +510,6 @@ impl PoolStreamer {
             );
 
             let mut new_bin_arrays = Vec::with_capacity(3);
-            let mut pending = self.pending_subscriptions.lock().await;
             let mut new_extra = Vec::with_capacity(4);
 
             // Preserve oracle from existing extra_accounts
@@ -522,7 +521,6 @@ impl PoolStreamer {
 
             for pda in &bin_pdas {
                 self.cache.register_tick_array(*pda, req.pool_address);
-                pending.push(pda.to_string());
                 match self.rpc.get_account_data(pda).await {
                     Ok(data) => {
                         if let Some(ba) = decoder::meteora_dlmm::decode_bin_array(&data) {
@@ -672,7 +670,6 @@ impl PoolStreamer {
                 .unwrap_or(false);
 
             let mut new_tick_arrays = Vec::with_capacity(7);
-            let mut pending = self.pending_subscriptions.lock().await;
 
             if is_whirlpool {
                 let start_indices =
@@ -680,7 +677,6 @@ impl PoolStreamer {
                 for start_index in start_indices {
                     if let Some(pda) = decoder::orca_whirlpool::tick_array_pda(&req.pool_address, start_index) {
                         self.cache.register_tick_array(pda, req.pool_address);
-                        pending.push(pda.to_string());
                         match self.rpc.get_account_data(&pda).await {
                             Ok(ta_data) => {
                                 if let Some(ta) = decoder::orca_whirlpool::decode_tick_array(&ta_data, req.tick_spacing) {
@@ -699,7 +695,6 @@ impl PoolStreamer {
                 for start_index in start_indices {
                     if let Some(pda) = decoder::raydium_clmm::tick_array_pda(&req.pool_address, start_index) {
                         self.cache.register_tick_array(pda, req.pool_address);
-                        pending.push(pda.to_string());
                         match self.rpc.get_account_data(&pda).await {
                             Ok(ta_data) => {
                                 if let Some(ta) = decoder::raydium_clmm::decode_tick_array(&ta_data) {

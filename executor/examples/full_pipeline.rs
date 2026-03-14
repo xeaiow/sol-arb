@@ -6,7 +6,9 @@
 //! All settings are read from config.toml (default: config.toml).
 //! Override config path: CONFIG_PATH=path/to/config.toml
 
+use std::collections::HashSet;
 use std::sync::Arc;
+use std::sync::atomic::Ordering;
 
 use arb_engine::engine::Engine;
 use arb_executor::config::ExecutorConfigFile;
@@ -91,6 +93,7 @@ async fn main() -> anyhow::Result<()> {
     let (pool_streamer, update_rx) = PoolStreamer::new(streamer_config);
     let pool_streamer = Arc::new(pool_streamer);
     let sub_notify = pool_streamer.subscription_notify();
+    let sub_dirty = pool_streamer.subscription_dirty();
     let vault_notify = pool_streamer.vault_notify();
     let tick_notify = pool_streamer.tick_reload_notify();
     eprintln!("Stage 1 (PoolStreamer) ready");
@@ -167,44 +170,56 @@ async fn main() -> anyhow::Result<()> {
     eprintln!("\n=== Pipeline running. Warming up... ===");
     eprintln!("(Press Ctrl-C to stop)\n");
 
-    // ── gRPC subscription updater: periodically add new vault/tick array accounts ──
-    // Cumulative list of explicit account addresses for gRPC subscription
+    // ── gRPC subscription updater: batch new vault/tick array accounts ──
+    // Uses a collect-then-send loop: after each wake, keeps draining for up to
+    // 2 seconds to accumulate accounts from many concurrent pool registrations,
+    // then sends ONE gRPC update with all of them. This turns O(pools) updates
+    // into O(1) per batch window.
     let sub_streamer = pool_streamer.clone();
     let sub_grpc = grpc.clone();
     let sub_program_ids = program_ids.clone();
     let subscription_updater = async move {
-        let mut cumulative_accounts: Vec<String> = Vec::new();
+        let mut account_set: HashSet<String> = HashSet::new();
+        let mut account_list: Vec<String> = Vec::new();
         loop {
+            // Phase 1: Wait for first notification (blocks until something arrives)
             sub_notify.notified().await;
 
-            // Drain newly discovered vault/tick array addresses
-            let new_accounts = sub_streamer.drain_pending_subscriptions().await;
-            if new_accounts.is_empty() {
-                continue;
-            }
-
-            // Add to cumulative list (dedup)
-            let before = cumulative_accounts.len();
-            for addr in &new_accounts {
-                if !cumulative_accounts.contains(addr) {
-                    cumulative_accounts.push(addr.clone());
+            // Phase 2: Collect — keep draining for up to 2s to batch concurrent arrivals
+            let deadline = tokio::time::Instant::now() + tokio::time::Duration::from_secs(2);
+            let mut total_added = 0usize;
+            loop {
+                // Drain whatever is pending right now
+                let new_accounts = sub_streamer.drain_pending_subscriptions().await;
+                for addr in new_accounts {
+                    if account_set.insert(addr.clone()) {
+                        account_list.push(addr);
+                        total_added += 1;
+                    }
+                }
+                // Wait for more until deadline
+                if tokio::time::timeout_at(deadline, sub_notify.notified()).await.is_err() {
+                    // Deadline reached — do final drain and send
+                    let final_accounts = sub_streamer.drain_pending_subscriptions().await;
+                    for addr in final_accounts {
+                        if account_set.insert(addr.clone()) {
+                            account_list.push(addr);
+                            total_added += 1;
+                        }
+                    }
+                    break;
                 }
             }
-            let added = cumulative_accounts.len() - before;
-            if added == 0 {
+
+            if total_added == 0 {
                 continue;
             }
 
             log::info!(
                 "Updating gRPC subscription: +{} accounts (total {} explicit)",
-                added, cumulative_accounts.len()
+                total_added, account_list.len()
             );
 
-            // Update gRPC subscription with TWO separate account filters:
-            // 1) owner filter for DEX pool accounts (program-owned)
-            // 2) explicit account filter for vault token accounts (SPL Token owned)
-            // These MUST be separate because Yellowstone gRPC ANDs account+owner
-            // within the same filter — vaults would be filtered out by DEX owner check.
             let tx_filter = TransactionFilter {
                 account_include: sub_program_ids.clone(),
                 account_exclude: vec![],
@@ -216,7 +231,7 @@ async fn main() -> anyhow::Result<()> {
                 filters: vec![],
             };
             let explicit_filter = AccountFilter {
-                account: cumulative_accounts.clone(),
+                account: account_list.clone(),
                 owner: vec![],
                 filters: vec![],
             };
