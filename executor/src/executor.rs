@@ -16,6 +16,9 @@ use crate::tx_builder::TxBuilder;
 /// Shared blockhash provider — fed by gRPC BlockMeta events.
 pub type SharedBlockhash = Arc<tokio::sync::RwLock<Option<Hash>>>;
 
+/// Shared latest blockhash, updated by a background task every 2 seconds.
+pub type LatestBlockhash = Arc<tokio::sync::RwLock<Hash>>;
+
 pub struct Executor {
     _config: ExecutorConfigFile,
     tx_builder: TxBuilder,
@@ -107,8 +110,8 @@ impl Executor {
 
         let mut latest_slot: u64 = 0;
 
-        // Try gRPC blockhash first, fall back to RPC
-        let mut recent_blockhash = if let Some(ref sbh) = self.shared_blockhash {
+        // Get initial blockhash
+        let initial_blockhash = if let Some(ref sbh) = self.shared_blockhash {
             let bh = sbh.read().await;
             match *bh {
                 Some(h) => h,
@@ -122,7 +125,50 @@ impl Executor {
             self.rpc.get_latest_blockhash().await
                 .expect("Failed to get initial blockhash")
         };
-        let mut blockhash_slot: u64 = 0;
+
+        // Shared blockhash updated by background task
+        let latest_bh: LatestBlockhash = Arc::new(tokio::sync::RwLock::new(initial_blockhash));
+
+        // Background task: refresh blockhash every 2 seconds
+        // Prefers gRPC BlockMeta; falls back to RPC polling.
+        {
+            let bh_handle = latest_bh.clone();
+            let grpc_bh = self.shared_blockhash.clone();
+            let rpc = self.rpc.clone();
+            tokio::spawn(async move {
+                loop {
+                    tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+
+                    // Try gRPC first
+                    let got_grpc = if let Some(ref sbh) = grpc_bh {
+                        if let Ok(bh) = sbh.try_read() {
+                            if let Some(h) = *bh {
+                                *bh_handle.write().await = h;
+                                true
+                            } else {
+                                false
+                            }
+                        } else {
+                            false
+                        }
+                    } else {
+                        false
+                    };
+
+                    // Fallback to RPC
+                    if !got_grpc {
+                        match rpc.get_latest_blockhash().await {
+                            Ok(bh) => {
+                                *bh_handle.write().await = bh;
+                            }
+                            Err(e) => {
+                                warn!("Blockhash refresh failed: {}", e);
+                            }
+                        }
+                    }
+                }
+            });
+        }
 
         loop {
             let opp = match self.opp_rx.recv().await {
@@ -143,36 +189,8 @@ impl Executor {
                 continue;
             }
 
-            // Update blockhash: try gRPC first, fallback to RPC
-            let got_grpc_blockhash = if let Some(ref sbh) = self.shared_blockhash {
-                if let Ok(bh) = sbh.try_read() {
-                    if let Some(h) = *bh {
-                        recent_blockhash = h;
-                        true
-                    } else {
-                        false
-                    }
-                } else {
-                    false
-                }
-            } else {
-                false
-            };
-
-            if !got_grpc_blockhash {
-                const BLOCKHASH_REFRESH_SLOTS: u64 = 50;
-                if latest_slot.saturating_sub(blockhash_slot) >= BLOCKHASH_REFRESH_SLOTS {
-                    match self.rpc.get_latest_blockhash().await {
-                        Ok(bh) => {
-                            recent_blockhash = bh;
-                            blockhash_slot = latest_slot;
-                        }
-                        Err(e) => {
-                            warn!("Failed to refresh blockhash: {}", e);
-                        }
-                    }
-                }
-            }
+            // Read latest blockhash (always fresh from background task)
+            let recent_blockhash = *latest_bh.read().await;
 
             let t_start = std::time::Instant::now();
             let pair = self.tx_builder.build(&opp, &self.payer, recent_blockhash);
