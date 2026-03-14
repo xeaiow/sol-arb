@@ -1,5 +1,4 @@
 use std::collections::HashMap;
-use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 use log::{info, debug};
 use rayon::prelude::*;
@@ -10,7 +9,7 @@ use solana_streamer_sdk::pool::state::{DexType, PoolMath, PoolUpdate};
 use solana_streamer_sdk::pool::decoder::raydium_clmm;
 use solana_streamer_sdk::pool::decoder::orca_whirlpool;
 
-use crate::config::{EngineConfig, WSOL_MINT};
+use crate::config::EngineConfig;
 use crate::graph::{PoolEntry, TokenGraph};
 use crate::opportunity::{Opportunity, PoolSnapshot, Route};
 use crate::optimizer;
@@ -31,62 +30,6 @@ fn route_key(route: &Route) -> RouteKey {
         pools[i] = hop.pool_index;
     }
     (pools, route.hops.len() as u8)
-}
-
-/// Calculate max allowed stale slots based on pool reserves (SOL equivalent).
-/// Large pools tolerate more staleness; small pools need fresh data.
-fn max_stale_slots(pool: &PoolEntry) -> u64 {
-    let sol_reserve = match &pool.math {
-        PoolMath::ConstantProduct { reserve_a, reserve_b, .. } => {
-            if pool.mint_a == WSOL_MINT {
-                *reserve_a
-            } else if pool.mint_b == WSOL_MINT {
-                *reserve_b
-            } else {
-                (*reserve_a).max(*reserve_b)
-            }
-        }
-        PoolMath::BondingCurve { virtual_sol_reserves, .. } => *virtual_sol_reserves,
-        PoolMath::Concentrated { liquidity, .. } => {
-            (*liquidity / 1_000_000) as u64
-        }
-        PoolMath::DammV2Concentrated { liquidity, .. } => {
-            (*liquidity / 1_000_000) as u64
-        }
-        PoolMath::MeteoraDlmm { bin_arrays, .. } => {
-            // Estimate SOL reserve from bin liquidity (one side is likely SOL)
-            let total: u64 = bin_arrays.iter()
-                .flat_map(|ba| ba.bins.iter())
-                .map(|b| b.amount_x.saturating_add(b.amount_y))
-                .sum();
-            total / 2
-        }
-    };
-
-    let sol = sol_reserve as f64 / 1e9;
-    if sol > 1000.0 {
-        5
-    } else if sol > 100.0 {
-        3
-    } else {
-        1
-    }
-}
-
-/// Check if any pool in the route is too stale relative to current_slot.
-fn find_stale_hop(route: &Route, graph: &TokenGraph, current_slot: u64) -> Option<(u32, u64, u64)> {
-    for hop in &route.hops {
-        let pool = &graph.pools[hop.pool_index as usize];
-        if pool.last_updated_slot == 0 {
-            continue;
-        }
-        let staleness = current_slot.saturating_sub(pool.last_updated_slot);
-        let max = max_stale_slots(pool);
-        if staleness > max {
-            return Some((hop.pool_index, staleness, max));
-        }
-    }
-    None
 }
 
 /// The main scanner that ties everything together
@@ -232,22 +175,14 @@ impl Scanner {
             .collect();
 
         // Phase 1: parallel probe — filter and rank routes by probe profit
+        // Data freshness is guaranteed by gRPC real-time push; simulateTransaction
+        // catches any on-chain divergence before sending.
         let probe_amount = self.config.probe_amount_lamports;
         let min_reserve = self.config.min_reserve_lamports;
-        let enable_staleness = self.config.enable_staleness_check;
         let graph = &self.graph;
 
-        let stale_skip_count = AtomicU64::new(0);
         let mut probed: Vec<(u32, Route, i64)> = routes.into_par_iter()
             .filter_map(|(idx, route)| {
-                // Staleness check: skip routes with stale pools
-                if enable_staleness {
-                    if let Some((_pool_idx, _staleness, _max)) = find_stale_hop(&route, graph, slot) {
-                        stale_skip_count.fetch_add(1, Ordering::Relaxed);
-                        return None;
-                    }
-                }
-
                 // Quick reserve check
                 for hop in &route.hops {
                     if !graph.pool_has_min_reserve(hop.pool_index, min_reserve) {
@@ -262,11 +197,6 @@ impl Scanner {
                 }
             })
             .collect();
-
-        let stale_skipped = stale_skip_count.load(Ordering::Relaxed);
-        if stale_skipped > 0 {
-            debug!("[STALE] Skipped {} routes (slot {}) in pool {} scan", stale_skipped, slot, pool_index);
-        }
 
         if probed.is_empty() {
             return;
