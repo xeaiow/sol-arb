@@ -46,10 +46,11 @@ impl MultiSender {
         if let Some(ast_cfg) = &config.astralane {
             if ast_cfg.enabled {
                 for endpoint in &ast_cfg.endpoints {
-                    astralane_senders.push(astralane::AstralaneSender::new(
-                        endpoint.clone(),
-                        ast_cfg.api_key.clone(),
-                    ));
+                    let sender = astralane::AstralaneSender::new(endpoint.clone());
+                    match sender.connect(&ast_cfg.api_key).await {
+                        Ok(_) => astralane_senders.push(sender),
+                        Err(e) => warn!("Failed to connect Astralane QUIC {}: {}", endpoint, e),
+                    }
                 }
             }
         }

@@ -1,49 +1,37 @@
+use std::sync::Arc;
 use anyhow::Result;
-use base64::Engine as _;
+use astralane_quic_client::AstralaneQuicClient;
 use solana_sdk::transaction::VersionedTransaction;
+use tokio::sync::Mutex;
 
 #[derive(Clone)]
 pub struct AstralaneSender {
     endpoint: String,
-    api_key: String,
-    client: reqwest::Client,
+    client: Arc<Mutex<Option<AstralaneQuicClient>>>,
 }
 
 impl AstralaneSender {
-    pub fn new(endpoint: String, api_key: String) -> Self {
+    pub fn new(endpoint: String) -> Self {
         Self {
             endpoint,
-            api_key,
-            client: reqwest::Client::new(),
+            client: Arc::new(Mutex::new(None)),
         }
+    }
+
+    /// Establish QUIC connection. Called once at startup.
+    pub async fn connect(&self, api_key: &str) -> Result<()> {
+        let client = AstralaneQuicClient::connect(&self.endpoint, api_key).await?;
+        *self.client.lock().await = Some(client);
+        log::info!("Astralane QUIC connected: {}", self.endpoint);
+        Ok(())
     }
 
     pub async fn send_transaction(&self, tx: &VersionedTransaction) -> Result<()> {
         let tx_bytes = bincode::serialize(tx)?;
-        let tx_base64 = base64::engine::general_purpose::STANDARD.encode(&tx_bytes);
-        log::info!("Astralane tx: {} raw bytes, {} b64 chars, body_first40=[{}]",
-            tx_bytes.len(), tx_base64.len(), &tx_base64[..40.min(tx_base64.len())]);
-
-        let url = format!(
-            "{}?api-key={}&method=sendTransaction",
-            self.endpoint, self.api_key,
-        );
-
-        let resp = self
-            .client
-            .post(&url)
-            .header("Content-Type", "text/plain")
-            .body(tx_base64)
-            .send()
-            .await?;
-
-        if !resp.status().is_success() {
-            let status = resp.status();
-            let text = resp.text().await.unwrap_or_default();
-            anyhow::bail!("Astralane HTTP {} ({}): {}", status, self.endpoint, text);
-        }
-
-        log::info!("Astralane sent OK: {}", self.endpoint);
+        let guard = self.client.lock().await;
+        let client = guard.as_ref().ok_or_else(|| anyhow::anyhow!("QUIC not connected: {}", self.endpoint))?;
+        client.send_transaction(&tx_bytes).await?;
+        log::info!("Astralane QUIC sent: {} ({} bytes)", self.endpoint, tx_bytes.len());
         Ok(())
     }
 }

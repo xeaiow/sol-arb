@@ -1,8 +1,6 @@
 use std::sync::Arc;
 use log::{info, debug, warn};
 use solana_client::nonblocking::rpc_client::RpcClient;
-use solana_client::rpc_config::RpcSimulateTransactionConfig;
-use solana_commitment_config::CommitmentConfig;
 use solana_sdk::hash::Hash;
 use solana_sdk::signer::{keypair::Keypair, Signer};
 use tokio::sync::mpsc;
@@ -227,54 +225,20 @@ impl Executor {
                 }
             }
 
-            // Simulate before sending — filter out false opportunities
+            // No simulate — send directly. On-chain PROD MODE profit check
+            // reverts unprofitable txs atomically (no actual loss).
             {
-                let sim_tx = pair.swqos_tx.as_ref().or(pair.jito_tx.as_ref());
-                if let Some(tx) = sim_tx {
-                    let sim_config = RpcSimulateTransactionConfig {
-                        sig_verify: false,
-                        replace_recent_blockhash: true,
-                        commitment: Some(CommitmentConfig::processed()),
-                        ..Default::default()
-                    };
-                    match self.rpc.simulate_transaction_with_config(tx, sim_config).await {
-                        Ok(sim_result) => {
-                            if let Some(err) = sim_result.value.err {
-                                let dex_types: Vec<String> = opp.pool_snapshots.iter()
-                                    .map(|s| format!("{:?}", s.dex_type)).collect();
-                                // Print program logs for debugging CPI errors
-                                if let Some(ref logs) = sim_result.value.logs {
-                                    for log in logs.iter().rev().take(10).collect::<Vec<_>>().into_iter().rev() {
-                                        debug!("[SIM_LOG] {}", log);
-                                    }
-                                }
-                                info!(
-                                    "[SIMULATE] FAIL: {} | engine_profit={:.6} SOL | {} hops slot={} dexes=[{}] → skipped",
-                                    err,
-                                    opp.expected_profit as f64 / 1e9,
-                                    opp.route.hops.len(),
-                                    opp.slot,
-                                    dex_types.join(","),
-                                );
-                                continue;
-                            }
-                            let cu_used = sim_result.value.units_consumed.unwrap_or(0);
-                            let dex_types: Vec<String> = opp.pool_snapshots.iter()
-                                .map(|s| format!("{:?}", s.dex_type)).collect();
-                            info!(
-                                "[SIMULATE] PASS: engine_profit={:.6} SOL, CU={} | {} hops slot={} dexes=[{}] → sending",
-                                opp.expected_profit as f64 / 1e9,
-                                cu_used,
-                                opp.route.hops.len(),
-                                opp.slot,
-                                dex_types.join(","),
-                            );
-                        }
-                        Err(e) => {
-                            warn!("[SIMULATE] RPC error: {} — sending anyway", e);
-                        }
-                    }
-                }
+                let dex_types: Vec<String> = opp.pool_snapshots.iter()
+                    .map(|s| format!("{:?}", s.dex_type)).collect();
+                let slot_lag = latest_slot.saturating_sub(opp.slot);
+                info!(
+                    "[SEND] engine_profit={:.6} SOL | {} hops slot={} lag={} dexes=[{}]",
+                    opp.expected_profit as f64 / 1e9,
+                    opp.route.hops.len(),
+                    opp.slot,
+                    slot_lag,
+                    dex_types.join(","),
+                );
             }
 
             // Test mode: send and wait, then exit
