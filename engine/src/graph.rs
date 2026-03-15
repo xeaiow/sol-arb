@@ -143,7 +143,7 @@ impl TokenGraph {
         let pool = &self.pools[pool_index as usize];
         match &pool.math {
             PoolMath::ConstantProduct { reserve_a, reserve_b, .. } => {
-                *reserve_a >= min_lamports || *reserve_b >= min_lamports
+                *reserve_a >= min_lamports && *reserve_b >= min_lamports
             }
             PoolMath::BondingCurve { virtual_sol_reserves, .. } => {
                 *virtual_sol_reserves >= min_lamports
