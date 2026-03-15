@@ -217,12 +217,50 @@ impl PoolStreamer {
     /// If already registered, just update math.
     pub async fn handle_account_update(&self, mut pool_state: PoolState) {
         if self.cache.contains(&pool_state.address) {
-            // Existing pool — just update math
+            // Existing pool — update math
             self.cache.update_math(
                 &pool_state.address,
                 pool_state.math,
                 pool_state.last_updated_slot,
             );
+
+            // Bootstrap pools have reserve=0 because their vaults were never
+            // subscribed via gRPC. When we see a pool account update (someone
+            // traded), subscribe to its vaults now so we get balance updates.
+            let needs_vaults = if let Some(pool) = self.cache.get(&pool_state.address) {
+                match &pool.math {
+                    PoolMath::ConstantProduct { reserve_a, reserve_b, .. } => {
+                        *reserve_a == 0 && *reserve_b == 0
+                    }
+                    _ => false,
+                }
+            } else {
+                false
+            };
+
+            if needs_vaults {
+                if let Some(pool) = self.cache.get(&pool_state.address) {
+                    let va = pool.vault_a;
+                    let vb = pool.vault_b;
+                    drop(pool);
+                    let mut pending_sub = self.pending_subscriptions.lock().await;
+                    let mut pending_vault = self.pending_vaults.lock().await;
+                    if let Some(va) = va {
+                        pending_sub.push(va.to_string());
+                        pending_vault.push(PendingVault { vault: va, is_vault_a: true });
+                    }
+                    if let Some(vb) = vb {
+                        pending_sub.push(vb.to_string());
+                        pending_vault.push(PendingVault { vault: vb, is_vault_a: false });
+                    }
+                    drop(pending_sub);
+                    drop(pending_vault);
+                    self.subscription_dirty.store(true, Ordering::Release);
+                    self.subscription_notify.notify_waiters();
+                    self.vault_notify.notify_one();
+                }
+            }
+
             return;
         }
 

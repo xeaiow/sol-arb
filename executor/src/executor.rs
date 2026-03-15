@@ -160,11 +160,14 @@ impl Executor {
                         match rpc.get_latest_blockhash().await {
                             Ok(bh) => {
                                 *bh_handle.write().await = bh;
+                                debug!("[BH] refreshed via RPC: {}", bh);
                             }
                             Err(e) => {
                                 warn!("Blockhash refresh failed: {}", e);
                             }
                         }
+                    } else {
+                        debug!("[BH] refreshed via gRPC");
                     }
                 }
             });
@@ -191,6 +194,7 @@ impl Executor {
 
             // Read latest blockhash (always fresh from background task)
             let recent_blockhash = *latest_bh.read().await;
+            debug!("[BH] using blockhash: {}", recent_blockhash);
 
             let t_start = std::time::Instant::now();
             let pair = self.tx_builder.build(&opp, &self.payer, recent_blockhash);
