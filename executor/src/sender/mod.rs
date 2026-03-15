@@ -1,6 +1,7 @@
 pub mod jito;
 pub mod flashblock;
 pub mod astralane;
+pub mod astralane_quic;
 
 use base64::Engine as _;
 use log::{info, warn};

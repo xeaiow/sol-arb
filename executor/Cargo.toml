@@ -29,7 +29,14 @@ bs58 = "0.5"
 base64 = "0.22"
 futures = "0.3"
 astralane-quic-client = { git = "https://github.com/Astralane/astralane-quic-client" }
+quinn = "0.11"
+rustls = { version = "0.23", features = ["ring", "std"] }
+rcgen = "0.13"
 solana-account-decoder = "3.1.9"
+
+[[bin]]
+name = "test_quic_direct"
+path = "src/bin/test_quic_direct.rs"
 
 [[bin]]
 name = "test_quic_send"
