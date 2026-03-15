@@ -1,84 +1,89 @@
 use anyhow::Result;
+use base64::Engine as _;
 use solana_sdk::transaction::VersionedTransaction;
-use tonic::transport::{Channel, ClientTlsConfig};
 
-pub mod proto {
-    pub mod packet {
-        tonic::include_proto!("packet");
-    }
-    pub mod shared {
-        tonic::include_proto!("shared");
-    }
-    pub mod bundle {
-        tonic::include_proto!("bundle");
-    }
-    pub mod searcher {
-        tonic::include_proto!("searcher");
-    }
-    pub mod auth {
-        tonic::include_proto!("auth");
-    }
-}
-
-use proto::searcher::searcher_service_client::SearcherServiceClient;
-
+/// Jito bundle sender via HTTP JSON-RPC (no auth required).
+/// Bundles are atomic: all txs succeed or none land on-chain.
+/// Failed bundles don't cost any fees.
 #[derive(Clone)]
 pub struct JitoSender {
+    /// HTTP endpoint (e.g. "https://mainnet.block-engine.jito.wtf")
     pub endpoint: String,
-    client: Option<SearcherServiceClient<Channel>>,
+    url: String,
+    client: reqwest::Client,
 }
 
 impl JitoSender {
     pub fn new(endpoint: String) -> Self {
+        let url = format!("{}/api/v1/bundles", endpoint);
         Self {
             endpoint,
-            client: None,
+            url,
+            client: reqwest::Client::new(),
         }
     }
 
-    /// Connect gRPC channel with TLS at startup.
+    /// Pre-connect is no longer needed (HTTP), but keep the interface.
     pub async fn connect(&mut self) -> Result<()> {
-        let channel = Channel::from_shared(self.endpoint.clone())?
-            .tls_config(ClientTlsConfig::new().with_native_roots())?
-            .tcp_nodelay(true)
-            .connect_timeout(std::time::Duration::from_secs(5))
-            .timeout(std::time::Duration::from_secs(5))
-            .connect()
-            .await?;
-        self.client = Some(SearcherServiceClient::new(channel));
-        log::info!("Jito gRPC connected: {}", self.endpoint);
+        log::info!("Jito HTTP ready: {}", self.endpoint);
         Ok(())
     }
 
-    /// Send a bundle containing a single transaction
+    /// Send a bundle containing a single transaction via HTTP JSON-RPC.
     pub async fn send_bundle(&self, tx: &VersionedTransaction) -> Result<()> {
-        let client = self
-            .client
-            .as_ref()
-            .ok_or_else(|| anyhow::anyhow!("Jito not connected"))?;
-
         let tx_bytes = bincode::serialize(tx)?;
-        let packet = proto::packet::Packet {
-            data: tx_bytes.clone(),
-            meta: Some(proto::packet::Meta {
-                size: tx_bytes.len() as u64,
-                addr: String::new(),
-                port: 0,
-                flags: None,
-                sender_stake: 0,
-            }),
-        };
-        let bundle = proto::bundle::Bundle {
-            header: None,
-            packets: vec![packet],
-        };
-        let request = proto::searcher::SendBundleRequest {
-            bundle: Some(bundle),
-        };
+        let tx_base64 = base64::engine::general_purpose::STANDARD.encode(&tx_bytes);
 
-        let mut client = client.clone();
-        let _response = client.send_bundle(request).await?;
-        log::debug!("Jito bundle sent to {}", self.endpoint);
+        let body = serde_json::json!({
+            "jsonrpc": "2.0",
+            "id": 1,
+            "method": "sendBundle",
+            "params": [
+                [tx_base64],
+                {"encoding": "base64"}
+            ]
+        });
+
+        let resp = self.client
+            .post(&self.url)
+            .json(&body)
+            .send()
+            .await?;
+
+        if !resp.status().is_success() {
+            let status = resp.status();
+            let text = resp.text().await.unwrap_or_default();
+            anyhow::bail!("Jito HTTP {} ({}): {}", status, self.endpoint, text);
+        }
+
+        log::debug!("Jito bundle sent: {}", self.endpoint);
+        Ok(())
+    }
+
+    /// Send pre-serialized base64 transaction as a single-tx bundle.
+    pub async fn send_bundle_raw(&self, tx_base64: &str) -> Result<()> {
+        let body = serde_json::json!({
+            "jsonrpc": "2.0",
+            "id": 1,
+            "method": "sendBundle",
+            "params": [
+                [tx_base64],
+                {"encoding": "base64"}
+            ]
+        });
+
+        let resp = self.client
+            .post(&self.url)
+            .json(&body)
+            .send()
+            .await?;
+
+        if !resp.status().is_success() {
+            let status = resp.status();
+            let text = resp.text().await.unwrap_or_default();
+            anyhow::bail!("Jito HTTP {} ({}): {}", status, self.endpoint, text);
+        }
+
         Ok(())
     }
 }

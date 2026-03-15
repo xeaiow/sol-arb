@@ -480,8 +480,11 @@ fn damm_v2_get_amount_out(
         output * (1.0 - fee_rate)
     };
 
-    // Apply 0.3% haircut for f64 precision loss (same as CLMM)
-    let result = output_after_fee * 0.997;
+    // Apply 2% haircut for f64 precision loss on u128 fixed-point math.
+    // DammV2 uses Q64.64 sqrt_price and u128 liquidity; intermediate token
+    // amounts can reach trillions where f64 (53-bit mantissa) drifts ~3%.
+    // On-chain uses u256 for exact math; our f64 approximation needs this buffer.
+    let result = output_after_fee * 0.98;
     result.max(0.0) as u64
 }
 

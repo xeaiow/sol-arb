@@ -23,11 +23,7 @@ impl MultiSender {
         if let Some(jito_cfg) = &config.jito {
             if jito_cfg.enabled {
                 for url in &jito_cfg.block_engine_urls {
-                    let mut sender = jito::JitoSender::new(url.clone());
-                    if let Err(e) = sender.connect().await {
-                        warn!("Failed to pre-connect Jito {}: {}", url, e);
-                    }
-                    jito_senders.push(sender);
+                    jito_senders.push(jito::JitoSender::new(url.clone()));
                 }
             }
         }
@@ -75,14 +71,18 @@ impl MultiSender {
         let mut handles: Vec<JoinHandle<()>> = Vec::new();
 
         if let Some(ref tx) = pair.jito_tx {
-            for sender in &self.jito_senders {
-                let sender = sender.clone();
-                let tx = tx.clone();
-                handles.push(tokio::spawn(async move {
-                    if let Err(e) = sender.send_bundle(&tx).await {
-                        warn!("Jito send failed: {}", e);
-                    }
-                }));
+            // Serialize once for all Jito endpoints
+            if let Ok(tx_bytes) = bincode::serialize(tx) {
+                let tx_base64 = base64::engine::general_purpose::STANDARD.encode(&tx_bytes);
+                for sender in &self.jito_senders {
+                    let sender = sender.clone();
+                    let b64 = tx_base64.clone();
+                    handles.push(tokio::spawn(async move {
+                        if let Err(e) = sender.send_bundle_raw(&b64).await {
+                            warn!("Jito send failed: {}", e);
+                        }
+                    }));
+                }
             }
         }
 
