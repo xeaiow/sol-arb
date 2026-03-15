@@ -119,25 +119,39 @@ impl PoolMath {
                 fee_denominator,
             } => {
                 let (r_in, r_out) = if is_a_to_b {
-                    (*reserve_a as f64, *reserve_b as f64)
+                    (*reserve_a, *reserve_b)
                 } else {
-                    (*reserve_b as f64, *reserve_a as f64)
+                    (*reserve_b, *reserve_a)
                 };
-                if r_in == 0.0 || r_out == 0.0 {
+                if r_in == 0 || r_out == 0 {
                     return 0;
                 }
-                let fee = *fee_numerator as f64 / *fee_denominator as f64;
-                let amt = amount_in as f64 * (1.0 - fee);
-                // Guard: PumpSwap computes amt_after_fee * reserve in u64 on-chain.
-                // If the intermediate product overflows u64, the tx will revert
-                // with Overflow (0x1787). Skip these trades off-chain.
-                let (ri, ro) = if is_a_to_b { (*reserve_a, *reserve_b) } else { (*reserve_b, *reserve_a) };
-                let amt_u64 = amt as u64;
-                if (amt_u64 as u128).checked_mul(ro as u128).map_or(true, |v| v > u64::MAX as u128) {
+                // Match on-chain math exactly using u128:
+                // 1. Fee: ceil_div(amount * fee_rate, fee_denom) — rounds fee UP (less input after fee)
+                // 2. Swap: (amt_after_fee * r_out) / (r_in + amt_after_fee) — floor div (less output)
+                let amount = amount_in as u128;
+                let fee_num = *fee_numerator as u128;
+                let fee_den = *fee_denominator as u128;
+                // Ceiling division for fee: ⌈amount * fee_rate / fee_denom⌉
+                let fee_amount = amount
+                    .checked_mul(fee_num)
+                    .and_then(|v| v.checked_add(fee_den))
+                    .map(|v| v.saturating_sub(1) / fee_den)
+                    .unwrap_or(0);
+                let amt_after_fee = amount.saturating_sub(fee_amount);
+                if amt_after_fee == 0 {
                     return 0;
                 }
-                let _ = ri; // suppress unused warning
-                let out = (r_out * amt) / (r_in + amt);
+                // Guard: PumpSwap computes amt * reserve in u64 on-chain.
+                let ri = r_in as u128;
+                let ro = r_out as u128;
+                if amt_after_fee.checked_mul(ro).is_none() {
+                    return 0; // would overflow even u128, skip
+                }
+                // Floor division: output = (amt_after_fee * r_out) / (r_in + amt_after_fee)
+                let numerator = amt_after_fee * ro;
+                let denominator = ri + amt_after_fee;
+                let out = numerator / denominator;
                 out as u64
             }
             PoolMath::BondingCurve {
@@ -271,8 +285,10 @@ fn clmm_get_amount_out(
     let q64 = (1u128 << 64) as f64;
     let mut sqrt_price = sqrt_price_x64 as f64 / q64;
     let mut liq = liquidity as f64;
-    let fee_pct = fee_rate as f64 / 1_000_000.0;
-    let mut remaining = amount_in as f64 * (1.0 - fee_pct);
+    // Match on-chain fee: floor division to get amount after fee
+    // On-chain: fee = amount * fee_rate / 1_000_000 (floor), remaining = amount - fee
+    let fee_amount = (amount_in as u128) * (fee_rate as u128) / 1_000_000u128;
+    let mut remaining = (amount_in as u128).saturating_sub(fee_amount) as f64;
     let mut amount_out: f64 = 0.0;
 
     if remaining <= 0.0 || liq <= 0.0 {

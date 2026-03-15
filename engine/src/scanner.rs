@@ -183,6 +183,18 @@ impl Scanner {
 
         let mut probed: Vec<(u32, Route, i64)> = routes.into_par_iter()
             .filter_map(|(idx, route)| {
+                // Staleness check: skip routes with any pool >25 slots behind trigger
+                // (25 slots ≈ 10 seconds — generous enough for quiet pools,
+                // tight enough to catch 13-minute stale data)
+                for hop in &route.hops {
+                    let pool = &graph.pools[hop.pool_index as usize];
+                    if pool.last_updated_slot > 0 {
+                        let lag = slot.saturating_sub(pool.last_updated_slot);
+                        if lag > 25 {
+                            return None;
+                        }
+                    }
+                }
                 // Quick reserve check
                 for hop in &route.hops {
                     if !graph.pool_has_min_reserve(hop.pool_index, min_reserve) {
