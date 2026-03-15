@@ -30,6 +30,9 @@ use solana_streamer_sdk::streaming::yellowstone_grpc::{
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
+    // Install rustls crypto provider before any TLS usage (Jito gRPC, Astralane QUIC)
+    let _ = rustls::crypto::ring::default_provider().install_default();
+
     eprintln!("Starting full_pipeline...");
 
     // ── Load config ──────────────────────────────────────────────────────
