@@ -3,7 +3,12 @@
 //! gRPC only pushes pools with active trades. This module fills the gap by
 //! fetching all SOL-paired pools at startup, so the engine can discover
 //! arbitrage routes through tokens that have pools on 2+ DEXes.
+//!
+//! After pool registration, vault balances are batch-fetched via the private
+//! RPC node to populate reserves (otherwise pools stay at reserve=0 and can't
+//! be scanned for arbitrage).
 
+use std::collections::HashSet;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -16,7 +21,7 @@ use solana_sdk::pubkey;
 use solana_sdk::pubkey::Pubkey;
 
 use crate::pool::decoder;
-use crate::pool::state::DexType;
+use crate::pool::state::{DexType, PoolState};
 use crate::pool::streamer::PoolStreamer;
 
 const WSOL: Pubkey = pubkey!("So11111111111111111111111111111111111111112");
@@ -32,21 +37,18 @@ fn build_queries() -> Vec<GpaQuery> {
     let wsol = WSOL.to_bytes().to_vec();
 
     vec![
-        // Meteora DLMM — full scan (dataSize=904)
         GpaQuery {
             name: "Meteora DLMM",
             program_id: pubkey!("LBUZKhRxPF3XUpBCjp4YzTKgLccjZhTSDM9YuVaPwxo"),
             dex_type: DexType::MeteoraDlmm,
             filters: vec![RpcFilterType::DataSize(904)],
         },
-        // Orca Whirlpool — full scan (dataSize=653)
         GpaQuery {
             name: "Orca Whirlpool",
             program_id: pubkey!("whirLbMiicVdio4qvUfM5KAg6Ct8VwpYzGff3uctyCc"),
             dex_type: DexType::OrcaWhirlpool,
             filters: vec![RpcFilterType::DataSize(653)],
         },
-        // Raydium CLMM — SOL as mint0 (offset 73)
         GpaQuery {
             name: "Raydium CLMM (SOL=mint0)",
             program_id: pubkey!("CAMMCzo5YL8w4VFF8KVHrK22GGUsp5VTaW7grrKgrWqK"),
@@ -56,7 +58,6 @@ fn build_queries() -> Vec<GpaQuery> {
                 RpcFilterType::Memcmp(Memcmp::new_raw_bytes(73, wsol.clone())),
             ],
         },
-        // Raydium CLMM — SOL as mint1 (offset 105)
         GpaQuery {
             name: "Raydium CLMM (SOL=mint1)",
             program_id: pubkey!("CAMMCzo5YL8w4VFF8KVHrK22GGUsp5VTaW7grrKgrWqK"),
@@ -66,7 +67,6 @@ fn build_queries() -> Vec<GpaQuery> {
                 RpcFilterType::Memcmp(Memcmp::new_raw_bytes(105, wsol.clone())),
             ],
         },
-        // Raydium CPMM — SOL as token_1_mint (offset 200)
         GpaQuery {
             name: "Raydium CPMM (SOL=token1)",
             program_id: pubkey!("CPMMoo8L3F4NbTegBCKVNunggL7H1ZpdTHKxQB5qKP1C"),
@@ -79,7 +79,6 @@ fn build_queries() -> Vec<GpaQuery> {
                 RpcFilterType::Memcmp(Memcmp::new_raw_bytes(200, wsol.clone())),
             ],
         },
-        // Raydium CPMM — SOL as token_0_mint (offset 168)
         GpaQuery {
             name: "Raydium CPMM (SOL=token0)",
             program_id: pubkey!("CPMMoo8L3F4NbTegBCKVNunggL7H1ZpdTHKxQB5qKP1C"),
@@ -96,7 +95,7 @@ fn build_queries() -> Vec<GpaQuery> {
 }
 
 /// Decode raw account bytes into PoolState based on DEX type.
-fn decode_pool(dex_type: DexType, address: &Pubkey, data: &[u8]) -> Option<crate::pool::state::PoolState> {
+fn decode_pool(dex_type: DexType, address: &Pubkey, data: &[u8]) -> Option<PoolState> {
     match dex_type {
         DexType::MeteoraDlmm => decoder::meteora_dlmm::decode_bytes(address, data),
         DexType::OrcaWhirlpool => decoder::orca_whirlpool::decode_bytes(address, data),
@@ -108,19 +107,20 @@ fn decode_pool(dex_type: DexType, address: &Pubkey, data: &[u8]) -> Option<crate
 
 /// Bootstrap pools from getProgramAccounts at startup.
 ///
-/// Fetches all SOL-paired pools from DLMM, Whirlpool, CLMM, and CPMM
-/// via Helius gPA, decodes them, and registers them in the streamer's cache
-/// using lightweight registration (no tick array / bin array / fee fetch).
+/// Phase 1: Fetch all SOL-paired pools from DLMM, Whirlpool, CLMM, and CPMM.
+/// Phase 2: Batch fetch vault balances for all registered pools.
 pub async fn bootstrap_pools(streamer: &Arc<PoolStreamer>, gpa_rpc_url: &str) {
-    let rpc = RpcClient::new_with_commitment(
+    let gpa_rpc = RpcClient::new_with_commitment(
         gpa_rpc_url.to_string(),
         CommitmentConfig::confirmed(),
     );
 
+    // ── Phase 1: Fetch and register pools ──
     let queries = build_queries();
     let total_start = Instant::now();
     let mut total_registered = 0usize;
     let mut total_fetched = 0usize;
+    let mut all_vaults: Vec<(Pubkey, bool)> = Vec::new(); // (vault_pubkey, is_vault_a)
 
     for query in &queries {
         let start = Instant::now();
@@ -135,7 +135,7 @@ pub async fn bootstrap_pools(streamer: &Arc<PoolStreamer>, gpa_rpc_url: &str) {
             ..Default::default()
         };
 
-        match rpc.get_program_accounts_with_config(&query.program_id, config).await {
+        match gpa_rpc.get_program_accounts_with_config(&query.program_id, config).await {
             Ok(accounts) => {
                 let fetched = accounts.len();
                 total_fetched += fetched;
@@ -143,10 +143,16 @@ pub async fn bootstrap_pools(streamer: &Arc<PoolStreamer>, gpa_rpc_url: &str) {
 
                 for (pubkey, account) in &accounts {
                     if let Some(pool_state) = decode_pool(query.dex_type, pubkey, &account.data) {
+                        // Collect vaults before registering (registration doesn't queue vaults)
+                        if let Some(va) = pool_state.vault_a {
+                            all_vaults.push((va, true));
+                        }
+                        if let Some(vb) = pool_state.vault_b {
+                            all_vaults.push((vb, false));
+                        }
                         streamer.register_pool_lightweight(pool_state).await;
                         decoded += 1;
                     }
-                    // Yield every 100 pools to let other tasks run
                     if decoded % 100 == 0 && decoded > 0 {
                         tokio::task::yield_now().await;
                     }
@@ -163,17 +169,68 @@ pub async fn bootstrap_pools(streamer: &Arc<PoolStreamer>, gpa_rpc_url: &str) {
             }
         }
 
-        // Pause between queries to avoid Helius rate limits
         tokio::time::sleep(Duration::from_millis(500)).await;
     }
 
-    // Notify vault fetcher and subscription updater
+    info!(
+        "[GPA] Phase 1 complete: {} pools registered ({} fetched) in {:.1}s. Fetching vault balances...",
+        total_registered, total_fetched, total_start.elapsed().as_secs_f64(),
+    );
+
+    // ── Phase 2: Batch fetch vault balances via private RPC ──
+    // Dedup vaults (many pools share the same WSOL vault)
+    let mut seen = HashSet::new();
+    let unique_vaults: Vec<(Pubkey, bool)> = all_vaults
+        .into_iter()
+        .filter(|(pubkey, _)| seen.insert(*pubkey))
+        .collect();
+
+    info!("[GPA] Fetching {} unique vault balances...", unique_vaults.len());
+
+    // Use streamer's private RPC (not Helius) for vault fetches
+    let vault_start = Instant::now();
+    let mut fetched_count = 0usize;
+    let mut failed_count = 0usize;
+
+    for chunk in unique_vaults.chunks(50) {
+        let pubkeys: Vec<Pubkey> = chunk.iter().map(|(pk, _)| *pk).collect();
+        match streamer.rpc().get_multiple_accounts(&pubkeys).await {
+            Ok(accounts) => {
+                for (i, maybe_account) in accounts.iter().enumerate() {
+                    if let Some(account) = maybe_account {
+                        if account.data.len() >= 72 {
+                            let balance = u64::from_le_bytes(
+                                account.data[64..72].try_into().unwrap_or([0; 8]),
+                            );
+                            streamer.cache().update_vault_balance(
+                                &chunk[i].0,
+                                balance,
+                                chunk[i].1,
+                                0, // slot=0, will be updated by gRPC
+                            );
+                            fetched_count += 1;
+                        }
+                    }
+                }
+            }
+            Err(e) => {
+                failed_count += chunk.len();
+                if failed_count <= 100 {
+                    warn!("[GPA] Vault fetch batch failed: {}", e);
+                }
+            }
+        }
+
+        // Yield between batches to not block other tasks
+        tokio::task::yield_now().await;
+    }
+
+    // Notify subscription updater
     streamer.subscription_dirty().store(true, std::sync::atomic::Ordering::Release);
     streamer.subscription_notify().notify_waiters();
-    streamer.vault_notify().notify_one();
 
     info!(
-        "[GPA] Bootstrap complete: {} pools registered ({} fetched) in {:.1}s",
-        total_registered, total_fetched, total_start.elapsed().as_secs_f64(),
+        "[GPA] Bootstrap complete: {} pools, {} vault balances fetched ({} failed) in {:.1}s",
+        total_registered, fetched_count, failed_count, total_start.elapsed().as_secs_f64(),
     );
 }

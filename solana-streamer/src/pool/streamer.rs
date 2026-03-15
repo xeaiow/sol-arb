@@ -100,6 +100,10 @@ impl PoolStreamer {
         self.cache.clone()
     }
 
+    pub fn rpc(&self) -> &RpcClient {
+        &self.rpc
+    }
+
     pub fn subscription_notify(&self) -> Arc<Notify> {
         self.subscription_notify.clone()
     }

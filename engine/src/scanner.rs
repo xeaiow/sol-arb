@@ -42,6 +42,8 @@ pub struct Scanner {
     opportunity_tx: mpsc::Sender<Opportunity>,
     /// Dedup: route_key -> (time, profit) of last emitted opportunity
     recent_emissions: HashMap<RouteKey, (Instant, u64)>,
+    /// Counter for periodic scan stats logging
+    scan_counter: std::sync::atomic::AtomicU64,
 }
 
 impl Scanner {
@@ -57,6 +59,7 @@ impl Scanner {
             phase: Phase::Warmup { start: Instant::now() },
             update_rx,
             opportunity_tx,
+            scan_counter: std::sync::atomic::AtomicU64::new(0),
             recent_emissions: HashMap::new(),
         }
     }
@@ -182,23 +185,26 @@ impl Scanner {
         let min_reserve = self.config.min_reserve_lamports;
         let graph = &self.graph;
 
+        use std::sync::atomic::{AtomicU32, Ordering as AtomOrd};
+        let stale_count = AtomicU32::new(0);
+        let reserve_count = AtomicU32::new(0);
+        let probe_neg_count = AtomicU32::new(0);
+
         let mut probed: Vec<(u32, Route, i64)> = routes.into_par_iter()
             .filter_map(|(idx, route)| {
-                // Staleness check: skip routes with any pool >25 slots behind trigger
-                // (25 slots ≈ 10 seconds — generous enough for quiet pools,
-                // tight enough to catch 13-minute stale data)
                 for hop in &route.hops {
                     let pool = &graph.pools[hop.pool_index as usize];
                     if pool.last_updated_slot > 0 {
                         let lag = slot.saturating_sub(pool.last_updated_slot);
                         if lag > 25 {
+                            stale_count.fetch_add(1, AtomOrd::Relaxed);
                             return None;
                         }
                     }
                 }
-                // Quick reserve check
                 for hop in &route.hops {
                     if !graph.pool_has_min_reserve(hop.pool_index, min_reserve) {
+                        reserve_count.fetch_add(1, AtomOrd::Relaxed);
                         return None;
                     }
                 }
@@ -206,10 +212,24 @@ impl Scanner {
                 if probe_profit > 0 {
                     Some((idx, route, probe_profit))
                 } else {
+                    probe_neg_count.fetch_add(1, AtomOrd::Relaxed);
                     None
                 }
             })
             .collect();
+
+        // Log scan stats periodically (every 1000th scan with routes > 10)
+        let scan_count = self.scan_counter.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        if indices.len() > 10 && scan_count % 1000 == 0 {
+            let sc = stale_count.load(AtomOrd::Relaxed);
+            let rc = reserve_count.load(AtomOrd::Relaxed);
+            let pn = probe_neg_count.load(AtomOrd::Relaxed);
+            let pp = probed.len();
+            info!(
+                "[SCAN_STATS] pool={} routes={} stale={} no_reserve={} probe_neg={} probe_pos={} slot={}",
+                pool_index, indices.len(), sc, rc, pn, pp, slot,
+            );
+        }
 
         if probed.is_empty() {
             return;
