@@ -45,22 +45,12 @@ impl MultiSender {
         let mut astralane_senders = Vec::new();
         if let Some(ast_cfg) = &config.astralane {
             if ast_cfg.enabled {
-                // Create senders with both QUIC + HTTP Iris channels
-                // QUIC connect in parallel — HTTP needs no setup
-                let futs: Vec<_> = ast_cfg.endpoints.iter().map(|endpoint| {
-                    let sender = astralane::AstralaneSender::new(
+                for endpoint in &ast_cfg.endpoints {
+                    astralane_senders.push(astralane::AstralaneSender::new(
                         endpoint.clone(),
                         ast_cfg.api_key.clone(),
-                    );
-                    let endpoint = endpoint.clone();
-                    async move {
-                        if let Err(e) = sender.connect().await {
-                            warn!("Astralane QUIC failed {}: {} (HTTP still active)", endpoint, e);
-                        }
-                        sender // Always keep — HTTP Iris works without QUIC
-                    }
-                }).collect();
-                astralane_senders = futures::future::join_all(futs).await;
+                    ));
+                }
             }
         }
 
