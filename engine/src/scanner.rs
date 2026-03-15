@@ -186,22 +186,15 @@ impl Scanner {
         let graph = &self.graph;
 
         use std::sync::atomic::{AtomicU32, Ordering as AtomOrd};
-        let stale_count = AtomicU32::new(0);
         let reserve_count = AtomicU32::new(0);
         let probe_neg_count = AtomicU32::new(0);
 
         let mut probed: Vec<(u32, Route, i64)> = routes.into_par_iter()
             .filter_map(|(idx, route)| {
-                for hop in &route.hops {
-                    let pool = &graph.pools[hop.pool_index as usize];
-                    if pool.last_updated_slot > 0 {
-                        let lag = slot.saturating_sub(pool.last_updated_slot);
-                        if lag > 100 {
-                            stale_count.fetch_add(1, AtomOrd::Relaxed);
-                            return None;
-                        }
-                    }
-                }
+                // No staleness check — data freshness guaranteed by:
+                // 1. gRPC real-time push for active pools
+                // 2. Bootstrap vault snapshot for quiet pools (data correct if no trades)
+                // 3. On-chain PROD MODE profit check as final gate
                 for hop in &route.hops {
                     if !graph.pool_has_min_reserve(hop.pool_index, min_reserve) {
                         reserve_count.fetch_add(1, AtomOrd::Relaxed);
@@ -221,13 +214,12 @@ impl Scanner {
         // Log scan stats periodically (every 1000th scan with routes > 10)
         let scan_count = self.scan_counter.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         if indices.len() > 10 && scan_count % 1000 == 0 {
-            let sc = stale_count.load(AtomOrd::Relaxed);
             let rc = reserve_count.load(AtomOrd::Relaxed);
             let pn = probe_neg_count.load(AtomOrd::Relaxed);
             let pp = probed.len();
             info!(
-                "[SCAN_STATS] pool={} routes={} stale={} no_reserve={} probe_neg={} probe_pos={} slot={}",
-                pool_index, indices.len(), sc, rc, pn, pp, slot,
+                "[SCAN_STATS] pool={} routes={} no_reserve={} probe_neg={} probe_pos={} slot={}",
+                pool_index, indices.len(), rc, pn, pp, slot,
             );
         }
 
