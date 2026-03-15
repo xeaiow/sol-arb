@@ -187,6 +187,9 @@ pub async fn bootstrap_pools(streamer: &Arc<PoolStreamer>, gpa_rpc_url: &str) {
 
     info!("[GPA] Fetching {} unique vault balances...", unique_vaults.len());
 
+    // Get current slot for vault balance timestamps
+    let current_slot = streamer.rpc().get_slot().await.unwrap_or(1);
+
     // Use streamer's private RPC (not Helius) for vault fetches
     let vault_start = Instant::now();
     let mut fetched_count = 0usize;
@@ -206,7 +209,7 @@ pub async fn bootstrap_pools(streamer: &Arc<PoolStreamer>, gpa_rpc_url: &str) {
                                 &chunk[i].0,
                                 balance,
                                 chunk[i].1,
-                                0, // slot=0, will be updated by gRPC
+                                current_slot,
                             );
                             fetched_count += 1;
                         }
