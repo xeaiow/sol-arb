@@ -325,7 +325,9 @@ impl PoolStreamer {
 
     /// Lightweight pool registration for bootstrap (gPA bulk load).
     /// Skips all RPC-intensive operations (tick arrays, bin arrays, AmmConfig, Token-2022 detect).
-    /// Pool is inserted with reserve=0; gRPC will fill in vault balances and tick data later.
+    /// Does NOT add vaults to gRPC subscription — 534K pools would produce 1M+ vault addresses
+    /// and crash the gRPC connection. Vault balances are fetched via batch RPC instead.
+    /// After batch fetch, pools with sufficient reserves become scannable.
     pub async fn register_pool_lightweight(&self, pool_state: PoolState) {
         if self.cache.contains(&pool_state.address) {
             return;
@@ -334,30 +336,14 @@ impl PoolStreamer {
             return;
         }
 
-        // Queue vault token accounts for gRPC subscription
-        {
-            let mut pending = self.pending_subscriptions.lock().await;
-            if let Some(vault_a) = &pool_state.vault_a {
-                pending.push(vault_a.to_string());
-            }
-            if let Some(vault_b) = &pool_state.vault_b {
-                pending.push(vault_b.to_string());
-            }
-        }
-
         // Insert pool (no tick array, no bin array, no fee fetch)
-        self.cache.insert(pool_state.clone());
+        self.cache.insert(pool_state);
 
-        // Queue vault addresses for batch RPC fetch
-        {
-            let mut pending = self.pending_vaults.lock().await;
-            if let Some(va) = pool_state.vault_a {
-                pending.push(PendingVault { vault: va, is_vault_a: true });
-            }
-            if let Some(vb) = pool_state.vault_b {
-                pending.push(PendingVault { vault: vb, is_vault_a: false });
-            }
-        }
+        // Do NOT queue vaults for gRPC subscription — too many addresses would crash gRPC.
+        // Do NOT queue vaults for batch RPC fetch — 1M+ vaults would overwhelm RPC.
+        // Vault balances will arrive when gRPC pushes pool account updates (owner filter),
+        // triggering handle_account_update which queues vaults for the specific pools that
+        // are actively traded.
     }
 
     fn handle_token_account_update(&self, token_account: &Pubkey, balance: u64, slot: u64) {
