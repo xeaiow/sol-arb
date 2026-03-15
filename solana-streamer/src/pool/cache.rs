@@ -289,6 +289,7 @@ impl PoolStateCache {
         };
 
         if let Some(mut pool) = self.pools.get_mut(&pool_address) {
+            // Update reserves for CP pools (vault balance = reserve)
             if let PoolMath::ConstantProduct {
                 ref mut reserve_a,
                 ref mut reserve_b,
@@ -300,23 +301,25 @@ impl PoolStateCache {
                 } else {
                     *reserve_b = balance;
                 }
-                pool.last_updated_slot = slot;
-
-                let update = PoolUpdate {
-                    pool_address: pool.address,
-                    dex_type: pool.dex_type,
-                    mint_a: pool.mint_a,
-                    mint_b: pool.mint_b,
-                    vault_a: pool.vault_a,
-                    vault_b: pool.vault_b,
-                    mint_a_is_2022: pool.mint_a_is_2022,
-                    mint_b_is_2022: pool.mint_b_is_2022,
-                    extra_accounts: pool.extra_accounts.clone(),
-                    math: pool.math.clone(),
-                    slot,
-                };
-                let _ = self.update_tx.try_send(update);
             }
+
+            // Always update slot and emit PoolUpdate (for all DEX types)
+            pool.last_updated_slot = slot;
+
+            let update = PoolUpdate {
+                pool_address: pool.address,
+                dex_type: pool.dex_type,
+                mint_a: pool.mint_a,
+                mint_b: pool.mint_b,
+                vault_a: pool.vault_a,
+                vault_b: pool.vault_b,
+                mint_a_is_2022: pool.mint_a_is_2022,
+                mint_b_is_2022: pool.mint_b_is_2022,
+                extra_accounts: pool.extra_accounts.clone(),
+                math: pool.math.clone(),
+                slot,
+            };
+            let _ = self.update_tx.try_send(update);
         }
     }
 
