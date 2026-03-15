@@ -207,7 +207,43 @@ RPC endpoint: 用 config.toml 中的 `rpc_url`，或 fallback 到 `https://mainn
 8. Meteora DLMM — ConstantProduct（bin-based，用 vault balance 近似報價）
 9. Orca Whirlpool — Concentrated（tick-based CLMM，與 Raydium CLMM 共用數學模型）
 
+## getProgramAccounts 批量拉池（覆蓋面優化）
+
+### 問題
+gRPC 只推送有交易的 pool，靜默池子不被發現。導致啟動後只有 ~70 個 mint 有 2+ edges，大量套利迴路缺失。
+
+### 測試結果（2026-03-14，Helius beta endpoint）
+
+| DEX | SOL as A | SOL as B | 合計 | 拉取時間 | Filter |
+|-----|----------|----------|------|---------|--------|
+| Raydium CPMM | 190,687 | 8,409 | 199K | 6.8s | dataSize=637 + disc |
+| Raydium CLMM | 111,565 | 3,143 | 115K | 32.5s | dataSize=1544 |
+| Meteora DLMM | 3,952 | 97,626 | 102K | 13.2s | dataSize=904 |
+| Meteora DammV2 | 152,582 | 641,883 | 794K | 8.0s | disc only（太多） |
+| Orca Whirlpool | 22,736 | 900 | 24K | 2.8s | dataSize=653 |
+| **合計** | | | **1,233K** | ~63s | |
+
+### 精簡策略（Phase 1）
+只拉量小且跟 PumpSwap 交叉最多的：
+- **必拉**: DLMM 全量（102K）、Orca 全量（24K）
+- **必拉**: CLMM SOL-B（3K）、CPMM SOL-B（8K）
+- **跳過**: DammV2（794K 太多）、CPMM/CLMM SOL-A（量大、gRPC 已覆蓋）
+- 精簡方案合計 ~138K pools，約 20 秒拉完
+
+### Mint memcmp offsets（已驗證）
+- Raydium CPMM: token_0_mint=168, token_1_mint=200, dataSize=637
+- Raydium CLMM: token_mint0=73, token_mint1=105, dataSize=1544
+- Meteora DLMM: token_x_mint=88, token_y_mint=120, dataSize=904
+- Meteora DammV2: token_a_mint=168, token_b_mint=200, disc=`f19a6d0411b16dbc`
+- Orca Whirlpool: token_mint_a=101, token_mint_b=181, dataSize=653
+- PumpSwap: disc=`f19a6d0411b16dbc`（不需拉，gRPC 已覆蓋）
+
+### 私人節點限制
+`http://45.157.234.194:8899` 沒有啟用 `--account-index program-id`，不支援 gPA。需用 Helius 或啟用索引。
+
+### 測試腳本
+`executor/src/bin/test_gpa.rs`
+
 ## Backlog 重點
 - Raydium CLMM tick_arrays 完整支援
-- 啟動時 getProgramAccounts 批量拉池子
-- 詳見 memory/backlog.md
+- 啟動時 getProgramAccounts 批量拉池子（見上方詳細分析）
