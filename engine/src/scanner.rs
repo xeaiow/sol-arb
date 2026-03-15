@@ -159,6 +159,7 @@ impl Scanner {
     /// Scan routes affected by a specific pool update.
     /// Uses parallel probe → sort → parallel ternary → emit best.
     fn scan_routes_for_pool(&mut self, pool_index: u32, slot: u64) {
+        let scan_start = Instant::now();
         let route_indices = self.route_table.index.routes_for_pool(pool_index);
         let indices: Vec<u32> = route_indices.to_vec();
 
@@ -253,9 +254,11 @@ impl Scanner {
         evaluated.sort_unstable_by(|a, b| b.2.cmp(&a.2));
 
         // Phase 3: emit opportunities (sequential — needs &mut self for dedup + channel)
+        let scan_us = scan_start.elapsed().as_micros();
         for (route, amount_in, profit) in evaluated {
             self.emit_opportunity(&route, slot, amount_in, profit);
         }
+        info!("[SCAN_TIME] pool={} routes={} scan={}µs", pool_index, indices.len(), scan_us);
     }
 
     /// Periodic maintenance: prune dead pools, reset dedup, log stats.

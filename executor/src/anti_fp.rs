@@ -41,19 +41,19 @@ pub fn jittered_cu(base_cu: u32, jitter_range: u32) -> u32 {
 pub const FLASHLOAN_CU_OVERHEAD: u32 = 120_000;
 
 pub fn estimate_cu(dex_types: &[u8]) -> u32 {
-    let mut cu: u32 = 100; // program overhead
+    let mut cu: u32 = 5_000; // program overhead (profit check, account setup)
     for dex in dex_types {
         cu += match dex {
-            0 => 35_000, // RaydiumAmmV4
-            1 => 35_000, // RaydiumCpmm
-            2 => 80_000, // RaydiumClmm
-            3 => 30_000, // PumpFun
-            4 => 35_000, // PumpSwap
-            5 => 30_000, // Bonk
-            6 => 45_000, // MeteoraDammV2
-            7 => 150_000, // MeteoraDlmm (bin-level swap2 is CU-heavy)
-            8 => 80_000, // OrcaWhirlpool
-            _ => 50_000, // unknown fallback
+            0 => 50_000,  // RaydiumAmmV4
+            1 => 50_000,  // RaydiumCpmm
+            2 => 100_000, // RaydiumClmm
+            3 => 45_000,  // PumpFun
+            4 => 85_000,  // PumpSwap (buy_exact_quote_in uses ~78K)
+            5 => 40_000,  // Bonk
+            6 => 60_000,  // MeteoraDammV2
+            7 => 200_000, // MeteoraDlmm (Swap2 is CU-heavy)
+            8 => 100_000, // OrcaWhirlpool
+            _ => 60_000,  // unknown fallback
         };
     }
     cu

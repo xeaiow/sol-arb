@@ -142,11 +142,13 @@ impl PoolMath {
                 if amt_after_fee == 0 {
                     return 0;
                 }
-                // Guard: PumpSwap computes amt * reserve in u64 on-chain.
+                // Guard: PumpSwap computes amt_after_fee * reserve in u64 on-chain.
+                // If the intermediate product overflows u64, the tx reverts with
+                // Overflow (0x1787 / 6023). Check using u128 comparison.
                 let ri = r_in as u128;
                 let ro = r_out as u128;
-                if amt_after_fee.checked_mul(ro).is_none() {
-                    return 0; // would overflow even u128, skip
+                if amt_after_fee * ro > u64::MAX as u128 {
+                    return 0;
                 }
                 // Floor division: output = (amt_after_fee * r_out) / (r_in + amt_after_fee)
                 let numerator = amt_after_fee * ro;

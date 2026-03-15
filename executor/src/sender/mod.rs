@@ -2,6 +2,7 @@ pub mod jito;
 pub mod flashblock;
 pub mod astralane;
 
+use base64::Engine as _;
 use log::{info, warn};
 use tokio::task::JoinHandle;
 
@@ -97,21 +98,23 @@ impl MultiSender {
         }
 
         if let Some(ref tx) = pair.swqos_tx {
-            for sender in &self.astralane_senders {
-                let sender = sender.clone();
-                let tx = tx.clone();
-                handles.push(tokio::spawn(async move {
-                    if let Err(e) = sender.send_transaction(&tx).await {
-                        warn!("Astralane send failed: {}", e);
-                    }
-                }));
+            // Serialize once, share across all Astralane endpoints
+            if let Ok(tx_bytes) = bincode::serialize(tx) {
+                let tx_base64 = base64::engine::general_purpose::STANDARD.encode(&tx_bytes);
+                for sender in &self.astralane_senders {
+                    let sender = sender.clone();
+                    let b64 = tx_base64.clone();
+                    handles.push(tokio::spawn(async move {
+                        if let Err(e) = sender.send_raw(&b64).await {
+                            warn!("Astralane send failed: {}", e);
+                        }
+                    }));
+                }
             }
         }
 
-        for handle in handles {
-            if let Err(e) = handle.await {
-                warn!("Send task panicked: {}", e);
-            }
-        }
+        // Don't await handles — fire-and-forget for minimum latency.
+        // Errors are logged inside each spawned task.
+        drop(handles);
     }
 }
