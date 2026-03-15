@@ -196,7 +196,7 @@ impl Scanner {
                     let pool = &graph.pools[hop.pool_index as usize];
                     if pool.last_updated_slot > 0 {
                         let lag = slot.saturating_sub(pool.last_updated_slot);
-                        if lag > 25 {
+                        if lag > 100 {
                             stale_count.fetch_add(1, AtomOrd::Relaxed);
                             return None;
                         }
