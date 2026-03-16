@@ -190,6 +190,7 @@ impl Scanner {
         let probe_neg_count = AtomicU32::new(0);
         let best_loss = AtomicI64::new(i64::MIN); // closest to zero
 
+        let max_probe_ratio = self.config.max_profit_ratio;
         let mut probed: Vec<(u32, Route, i64)> = routes.into_par_iter()
             .filter_map(|(idx, route)| {
                 for hop in &route.hops {
@@ -200,10 +201,14 @@ impl Scanner {
                 }
                 let probe_profit = optimizer::simulate_route_profit(&route, graph, probe_amount);
                 if probe_profit > 0 {
+                    // Filter out suspiciously high profit ratios at probe stage
+                    let ratio = probe_profit as f64 / probe_amount as f64;
+                    if ratio > max_probe_ratio {
+                        return None;
+                    }
                     Some((idx, route, probe_profit))
                 } else {
                     probe_neg_count.fetch_add(1, AtomOrd::Relaxed);
-                    // Track best (closest to zero) loss
                     best_loss.fetch_max(probe_profit, AtomOrd::Relaxed);
                     None
                 }
@@ -340,6 +345,7 @@ impl Scanner {
             let rc = AtomicU32::new(0);
             let pn = AtomicU32::new(0);
 
+            let max_ratio = self.config.max_profit_ratio;
             let mut probed: Vec<(u32, Route, i64)> = all_routes.into_par_iter()
                 .filter_map(|(idx, route)| {
                     for hop in &route.hops {
@@ -350,6 +356,10 @@ impl Scanner {
                     }
                     let profit = optimizer::simulate_route_profit(&route, graph, probe_amount);
                     if profit > 0 {
+                        let ratio = profit as f64 / probe_amount as f64;
+                        if ratio > max_ratio {
+                            return None;
+                        }
                         Some((idx, route, profit))
                     } else {
                         pn.fetch_add(1, AtomOrd::Relaxed);
