@@ -317,7 +317,7 @@ fn swap_pumpswap(accounts: &[AccountView], is_a_to_b: bool, amount_in: u64) -> P
         let args = dex_pinocchio_cpi::pump_fun_amm::BuyExactQuoteInArgs {
             spendable_quote_in: amount_in,
             min_base_amount_out: 1,
-            track_volume: 0,  // OptionBool: false (don't track volume)
+            track_volume: 1,  // OptionBool: true (must be true to avoid Overflow in buy.rs:701)
         };
         dex_pinocchio_cpi::pump_fun_amm::buy_exact_quote_in(&buy_accounts, &args, &[])
     } else {
