@@ -37,6 +37,16 @@ fn build_queries() -> Vec<GpaQuery> {
     let wsol = WSOL.to_bytes().to_vec();
 
     vec![
+        // PumpSwap: all pools have quote_mint=SOL at offset 75 (8 disc + 1 bump + 2 index + 32 creator + 32 base_mint)
+        GpaQuery {
+            name: "PumpSwap",
+            program_id: pubkey!("pAMMBay6oceH9fJKBRHGP5D4bD4sWpmSwMn52FMfXEA"),
+            dex_type: DexType::PumpSwap,
+            filters: vec![
+                RpcFilterType::DataSize(244),
+                RpcFilterType::Memcmp(Memcmp::new_raw_bytes(75, wsol.clone())),
+            ],
+        },
         GpaQuery {
             name: "Meteora DLMM",
             program_id: pubkey!("LBUZKhRxPF3XUpBCjp4YzTKgLccjZhTSDM9YuVaPwxo"),
@@ -101,6 +111,7 @@ fn decode_pool(dex_type: DexType, address: &Pubkey, data: &[u8]) -> Option<PoolS
         DexType::OrcaWhirlpool => decoder::orca_whirlpool::decode_bytes(address, data),
         DexType::RaydiumClmm => decoder::raydium_clmm::decode_bytes(address, data),
         DexType::RaydiumCpmm => decoder::raydium_cpmm::decode_bytes(address, data),
+        DexType::PumpSwap => decoder::pumpswap::decode_bytes(address, data),
         _ => None,
     }
 }

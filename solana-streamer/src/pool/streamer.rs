@@ -23,7 +23,7 @@ impl Default for PoolStreamerConfig {
     fn default() -> Self {
         Self {
             rpc_url: "https://api.mainnet-beta.solana.com".to_string(),
-            update_channel_size: 4096,
+            update_channel_size: 1_000_000,
         }
     }
 }
