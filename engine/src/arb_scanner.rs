@@ -24,7 +24,7 @@ use crate::opportunity::{Hop, Opportunity, PoolSnapshot, Route};
 const WSOL: Pubkey = solana_sdk::pubkey!("So11111111111111111111111111111111111111112");
 const MIN_SOL_RESERVE: u64 = 5_000_000_000; // 5 SOL
 const MAX_SPREAD_PCT: f64 = 50.0;
-const MIN_PROFIT_LAMPORTS: i64 = 10_000; // 0.00001 SOL minimum profit
+const MIN_PROFIT_LAMPORTS: i64 = 200_000; // 0.0002 SOL — must exceed priority fee + tx fee
 
 pub struct ArbScanner {
     cache: Arc<PoolStateCache>,
@@ -156,18 +156,15 @@ impl ArbScanner {
                 continue;
             }
 
-            // Simulate profit
+            // Quick probe: is there any profit at small amount?
             let sol_is_a_buy = buy_pool.mint_a == WSOL;
-            let tokens = buy_pool.math.get_amount_out(self.probe_amount, sol_is_a_buy);
-            if tokens == 0 { continue; }
-
             let sol_is_a_sell = sell_pool.mint_a == WSOL;
-            let sol_back = sell_pool.math.get_amount_out(tokens, !sol_is_a_sell);
-            let profit = sol_back as i64 - self.probe_amount as i64;
 
-            if profit < MIN_PROFIT_LAMPORTS {
-                continue;
-            }
+            let probe_tokens = buy_pool.math.get_amount_out(self.probe_amount, sol_is_a_buy);
+            if probe_tokens == 0 { continue; }
+            let probe_back = sell_pool.math.get_amount_out(probe_tokens, !sol_is_a_sell);
+            let probe_profit = probe_back as i64 - self.probe_amount as i64;
+            if probe_profit <= 0 { continue; }
 
             // Dedup: same pair within 2 seconds
             let pair_key = (buy_pool.address, sell_pool.address);
@@ -176,17 +173,30 @@ impl ArbScanner {
                     continue;
                 }
             }
+
+            // Ternary search for optimal input amount (maximize profit)
+            let (best_amount, best_profit) = self.find_optimal_amount(
+                buy_pool, sell_pool, sol_is_a_buy, sol_is_a_sell,
+            );
+
+            if best_profit < MIN_PROFIT_LAMPORTS {
+                continue;
+            }
+
             self.recent.insert(pair_key, Instant::now());
 
-            // Build opportunity
-            if let Some(opp) = self.build_opportunity(buy_pool, sell_pool, profit as u64) {
-                let profit_sol = profit as f64 / 1e9;
+            // Build opportunity with optimal amount
+            if let Some(mut opp) = self.build_opportunity(buy_pool, sell_pool, best_profit as u64) {
+                opp.amount_in = best_amount;
+                let profit_sol = best_profit as f64 / 1e9;
+                let amount_sol = best_amount as f64 / 1e9;
                 info!(
-                    "[ARB] {} | buy@{:?}({}) sell@{:?}({}) | spread={:.2}% profit={:.6} SOL",
+                    "[ARB] {} | buy@{:?}({}) sell@{:?}({}) | spread={:.2}% in={:.4} SOL profit={:.6} SOL ({:.2}%)",
                     &token_mint.to_string()[..8],
                     buy_pool.dex_type, &buy_pool.address.to_string()[..8],
                     sell_pool.dex_type, &sell_pool.address.to_string()[..8],
-                    spread, profit_sol,
+                    spread, amount_sol, profit_sol,
+                    profit_sol / amount_sol * 100.0,
                 );
                 let _ = self.opportunity_tx.try_send(opp);
                 emitted += 1;
@@ -221,6 +231,55 @@ impl ArbScanner {
         let out = pool.math.get_amount_out(probe, sol_is_a);
         if out == 0 { return None; }
         Some(out as f64 / probe as f64 * 1e9)
+    }
+
+    /// Ternary search for optimal input amount that maximizes profit.
+    /// Returns (best_amount, best_profit_lamports).
+    fn find_optimal_amount(
+        &self,
+        buy_pool: &PoolState,
+        sell_pool: &PoolState,
+        sol_is_a_buy: bool,
+        sol_is_a_sell: bool,
+    ) -> (u64, i64) {
+        let max_input = 10_000_000_000u64; // 10 SOL cap
+        let mut lo = 1_000_000u64;   // 0.001 SOL min
+        let mut hi = max_input;
+
+        // Ternary search: profit curve is concave (increases then decreases due to slippage)
+        for _ in 0..30 {
+            if hi - lo < 100_000 { break; } // 0.0001 SOL precision
+            let m1 = lo + (hi - lo) / 3;
+            let m2 = hi - (hi - lo) / 3;
+
+            let p1 = self.sim_profit(buy_pool, sell_pool, m1, sol_is_a_buy, sol_is_a_sell);
+            let p2 = self.sim_profit(buy_pool, sell_pool, m2, sol_is_a_buy, sol_is_a_sell);
+
+            if p1 < p2 {
+                lo = m1;
+            } else {
+                hi = m2;
+            }
+        }
+
+        let best = (lo + hi) / 2;
+        let profit = self.sim_profit(buy_pool, sell_pool, best, sol_is_a_buy, sol_is_a_sell);
+        (best, profit)
+    }
+
+    #[inline]
+    fn sim_profit(
+        &self,
+        buy_pool: &PoolState,
+        sell_pool: &PoolState,
+        amount_in: u64,
+        sol_is_a_buy: bool,
+        sol_is_a_sell: bool,
+    ) -> i64 {
+        let tokens = buy_pool.math.get_amount_out(amount_in, sol_is_a_buy);
+        if tokens == 0 { return i64::MIN; }
+        let sol_back = sell_pool.math.get_amount_out(tokens, !sol_is_a_sell);
+        sol_back as i64 - amount_in as i64
     }
 
     fn build_opportunity(&self, buy_pool: &PoolState, sell_pool: &PoolState, profit: u64) -> Option<Opportunity> {
