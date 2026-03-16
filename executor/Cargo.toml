@@ -37,6 +37,10 @@ solana-account-decoder = "3.1.9"
 spl-associated-token-account = "6.0.0"
 
 [[bin]]
+name = "test_dex_cpi"
+path = "src/bin/test_dex_cpi.rs"
+
+[[bin]]
 name = "test_pumpswap_direct"
 path = "src/bin/test_pumpswap_direct.rs"
 
