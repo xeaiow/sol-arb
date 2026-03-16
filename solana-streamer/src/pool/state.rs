@@ -417,13 +417,17 @@ fn clmm_get_amount_out(
 ///   A→B: next_sp = L*sp / (L + amt*sp), output = L*(sp - next_sp)
 ///   B→A: next_sp = sp + amt/L, output = L*(1/sp - 1/next_sp)
 /// Fee: applied on output for collect_fee_mode=0 (BothToken).
-/// DammV2 concentrated liquidity quote using u128 Q64.64 fixed-point math.
+/// DammV2 concentrated liquidity quote using U256 integer math.
 ///
-/// Matches on-chain formulas from MeteoraAg/damm-v2 concentrated_liquidity.rs:
-///   A→B: next_sp = L*sp / (L + amt*sp), output = L*(sp - next_sp) >> 64
-///   B→A: next_sp = sp + (amt << 128)/L, output = L*(1/sp - 1/next_sp)
-/// All sqrt_price values are in Q64.64 format (u128).
-/// Output uses floor rounding (conservative, matches on-chain Rounding::Down).
+/// Matches on-chain formulas from MeteoraAg/damm-v2 exactly:
+///   A→B: next_sp = L*sp / (L + amt*sp)  (round UP → less output)
+///        output (delta_b) = (L * (sp - next_sp)) >> 128  (round DOWN)
+///   B→A: next_sp = sp + (amt << 128) / L  (round DOWN)
+///        output (delta_a) = L * (next_sp - sp) / (sp * next_sp)  (round DOWN)
+///
+/// sqrt_price is Q64.64, liquidity is raw u128. The >> 128 shift in delta_b
+/// comes from L_raw × delta_sp(Q64.64) needing division by 2^64 to get
+/// integer output, combined with the Q64.64 multiplication structure.
 #[allow(clippy::too_many_arguments)]
 fn damm_v2_get_amount_out(
     amount_in: u64,
@@ -435,6 +439,8 @@ fn damm_v2_get_amount_out(
     fee_numerator: u64,
     collect_fee_mode: u8,
 ) -> u64 {
+    use ruint::aliases::U256;
+
     if sqrt_price_x64 == 0 || liquidity == 0 {
         return 0;
     }
@@ -442,71 +448,78 @@ fn damm_v2_get_amount_out(
     // Fee: deduct from input for compounding mode (mode=2), from output otherwise
     let fee_den = 1_000_000_000u128;
     let fee_num = fee_numerator as u128;
-    let amt = if collect_fee_mode == 2 {
+    let amt: u64 = if collect_fee_mode == 2 {
         let fee = (amount_in as u128) * fee_num / fee_den;
-        (amount_in as u128).saturating_sub(fee)
+        (amount_in as u128).saturating_sub(fee) as u64
     } else {
-        amount_in as u128
+        amount_in
     };
 
     if amt == 0 {
         return 0;
     }
 
-    // Use f64 for the core math but with proper boundary checks.
-    // Q64.64 → f64 conversion: value / 2^64
-    let q64 = (1u128 << 64) as f64;
-    let sp = sqrt_price_x64 as f64 / q64;
-    let sp_min = sqrt_min_price_x64 as f64 / q64;
-    let sp_max = sqrt_max_price_x64 as f64 / q64;
-    let l = liquidity as f64;
-    let a = amt as f64;
+    let sp = U256::from(sqrt_price_x64);
+    let l = U256::from(liquidity);
 
-    let (output, saturated) = if is_a_to_b {
-        // A→B: next_sp = L*sp / (L + amt*sp), output = L*(sp - next_sp)
-        // Boundary: check if amt would push price below sp_min
-        let max_a = l * (1.0 / sp_min - 1.0 / sp);
-        if a > max_a {
-            (l * (sp - sp_min), true)
-        } else {
-            let next_sp = l * sp / (l + a * sp);
-            (l * (sp - next_sp), false)
+    let output = if is_a_to_b {
+        // A→B: price decreases
+        // next_sp = L * sp / (L + amt * sp)  — round UP (conservative)
+        let product = U256::from(amt as u128) * sp;
+        let denominator = l + product;
+        if denominator == U256::ZERO {
+            return 0;
         }
+        let numerator = l * sp;
+        // Ceiling division: (num + den - 1) / den
+        let next_sp_u256 = (numerator + denominator - U256::from(1u64)) / denominator;
+        let next_sp = u128::try_from(next_sp_u256).unwrap_or(0);
+
+        // Boundary check
+        if next_sp <= sqrt_min_price_x64 {
+            return 0; // saturated
+        }
+
+        // delta_b = (L * (sp - next_sp)) >> 128  — round DOWN
+        let delta_sp = sqrt_price_x64.saturating_sub(next_sp);
+        let prod = U256::from(liquidity) * U256::from(delta_sp);
+        let out = prod >> 128;
+        u64::try_from(out).unwrap_or(0)
     } else {
-        // B→A: next_sp = sp + amt/L, output = L*(1/sp - 1/next_sp)
-        // Boundary: check if amt would push price above sp_max
-        let max_b = l * (sp_max - sp);
-        if a > max_b {
-            (l * (1.0 / sp - 1.0 / sp_max), true)
-        } else {
-            let next_sp = sp + a / l;
-            (l * (1.0 / sp - 1.0 / next_sp), false)
-        }
-    };
+        // B→A: price increases
+        // next_sp = sp + (amt << 128) / L  — round DOWN
+        let shifted = U256::from(amt as u128) << 128;
+        let quotient = shifted / l;
+        let next_sp_u256 = sp + quotient;
+        let next_sp = u128::try_from(next_sp_u256).unwrap_or(u128::MAX);
 
-    if saturated {
-        return 0;
-    }
+        // Boundary check
+        if next_sp >= sqrt_max_price_x64 {
+            return 0; // saturated
+        }
+
+        // delta_a = L * (next_sp - sp) / (sp * next_sp)  — round DOWN
+        let delta = next_sp.saturating_sub(sqrt_price_x64);
+        let num = U256::from(liquidity) * U256::from(delta);
+        let den = U256::from(sqrt_price_x64) * U256::from(next_sp);
+        if den == U256::ZERO {
+            return 0;
+        }
+        let out = num / den;
+        u64::try_from(out).unwrap_or(0)
+    };
 
     // Fee on output for BothToken mode (mode=0)
-    let output_after_fee = if collect_fee_mode == 2 {
-        output
+    let output = if collect_fee_mode != 2 && output > 0 {
+        let fee = (output as u128) * fee_num / fee_den;
+        output.saturating_sub(fee as u64)
     } else {
-        let fee_out = output * (fee_num as f64) / (fee_den as f64);
-        output - fee_out
+        output
     };
 
-    // Conservative 0.5% haircut for f64↔u128 precision gap.
-    // On-chain uses U256 with exact mul_div; our f64 has 53-bit mantissa.
-    // 0.5% is tighter than before (was 2%) but still safe because:
-    // - Core CL formula has limited precision loss for typical amounts
-    // - Boundary saturation (trillion-scale) returns 0 (handled above)
-    // - Fee deduction uses integer-like rounding
-    let result = output_after_fee * 0.995;
-    if result <= 0.0 {
-        return 0;
-    }
-    result as u64
+    // No haircut needed — U256 math matches on-chain exactly.
+    // Output is always <= on-chain due to conservative rounding (UP for next_sp, DOWN for output).
+    output
 }
 
 /// DLMM bin-level constant-sum quote (f64 fast-path).
