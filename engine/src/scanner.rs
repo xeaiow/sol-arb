@@ -185,16 +185,13 @@ impl Scanner {
         let min_reserve = self.config.min_reserve_lamports;
         let graph = &self.graph;
 
-        use std::sync::atomic::{AtomicU32, Ordering as AtomOrd};
+        use std::sync::atomic::{AtomicU32, AtomicI64, Ordering as AtomOrd};
         let reserve_count = AtomicU32::new(0);
         let probe_neg_count = AtomicU32::new(0);
+        let best_loss = AtomicI64::new(i64::MIN); // closest to zero
 
         let mut probed: Vec<(u32, Route, i64)> = routes.into_par_iter()
             .filter_map(|(idx, route)| {
-                // No staleness check — data freshness guaranteed by:
-                // 1. gRPC real-time push for active pools
-                // 2. Bootstrap vault snapshot for quiet pools (data correct if no trades)
-                // 3. On-chain PROD MODE profit check as final gate
                 for hop in &route.hops {
                     if !graph.pool_has_min_reserve(hop.pool_index, min_reserve) {
                         reserve_count.fetch_add(1, AtomOrd::Relaxed);
@@ -206,6 +203,8 @@ impl Scanner {
                     Some((idx, route, probe_profit))
                 } else {
                     probe_neg_count.fetch_add(1, AtomOrd::Relaxed);
+                    // Track best (closest to zero) loss
+                    best_loss.fetch_max(probe_profit, AtomOrd::Relaxed);
                     None
                 }
             })
@@ -213,13 +212,14 @@ impl Scanner {
 
         // Log scan stats periodically (every 1000th scan with routes > 10)
         let scan_count = self.scan_counter.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-        if indices.len() > 10 && scan_count % 1000 == 0 {
+        if indices.len() > 10 && scan_count % 100 == 0 {
             let rc = reserve_count.load(AtomOrd::Relaxed);
             let pn = probe_neg_count.load(AtomOrd::Relaxed);
             let pp = probed.len();
+            let bl = best_loss.load(AtomOrd::Relaxed);
             info!(
-                "[SCAN_STATS] pool={} routes={} no_reserve={} probe_neg={} probe_pos={} slot={}",
-                pool_index, indices.len(), rc, pn, pp, slot,
+                "[SCAN_STATS] pool={} routes={} no_reserve={} probe_neg={} probe_pos={} best_loss={:.6} SOL slot={}",
+                pool_index, indices.len(), rc, pn, pp, bl as f64 / 1e9, slot,
             );
         }
 

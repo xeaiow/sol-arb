@@ -247,58 +247,10 @@ impl Executor {
                 }
             }
 
-            // Simulate before sending to diagnose quote accuracy
             {
                 let dex_types: Vec<String> = opp.pool_snapshots.iter()
                     .map(|s| format!("{:?}", s.dex_type)).collect();
                 let slot_lag = latest_slot.saturating_sub(opp.slot);
-
-                let sim_tx = pair.swqos_tx.as_ref().or(pair.jito_tx.as_ref());
-                if let Some(tx) = sim_tx {
-                    use solana_commitment_config::CommitmentConfig;
-                    let sim_config = solana_client::rpc_config::RpcSimulateTransactionConfig {
-                        sig_verify: false,
-                        replace_recent_blockhash: true,
-                        commitment: Some(CommitmentConfig::processed()),
-                        ..Default::default()
-                    };
-                    match self.rpc.simulate_transaction_with_config(tx, sim_config).await {
-                        Ok(result) => {
-                            if let Some(ref err) = result.value.err {
-                                info!(
-                                    "[SIM_FAIL] engine_profit={:.6} SOL | {} hops lag={} dexes=[{}] | err={:?}",
-                                    opp.expected_profit as f64 / 1e9,
-                                    opp.route.hops.len(),
-                                    slot_lag,
-                                    dex_types.join(","),
-                                    err,
-                                );
-                                // Log program logs for diagnosis
-                                if let Some(ref logs) = result.value.logs {
-                                    for log in logs.iter().rev().take(5).collect::<Vec<_>>().into_iter().rev() {
-                                        debug!("[SIM_LOG] {}", log);
-                                    }
-                                }
-                                continue; // Skip sending — would fail on-chain anyway
-                            } else {
-                                let cu = result.value.units_consumed.unwrap_or(0);
-                                info!(
-                                    "[SIM_PASS] engine_profit={:.6} SOL | {} hops lag={} CU={} dexes=[{}]",
-                                    opp.expected_profit as f64 / 1e9,
-                                    opp.route.hops.len(),
-                                    slot_lag,
-                                    cu,
-                                    dex_types.join(","),
-                                );
-                            }
-                        }
-                        Err(e) => {
-                            // RPC error — don't block, send anyway
-                            debug!("[SIM_ERR] rpc error: {}, sending anyway", e);
-                        }
-                    }
-                }
-
                 info!(
                     "[SEND] engine_profit={:.6} SOL | {} hops slot={} lag={} dexes=[{}]",
                     opp.expected_profit as f64 / 1e9,
