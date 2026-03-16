@@ -91,8 +91,9 @@ fn from_whirlpool_data(
     token_vault_b: Pubkey,
     slot: u64,
 ) -> PoolState {
-    // Orca fee_rate is in basis points (1/10000), convert to 1e-6 units for our CLMM math
-    let fee_rate_1e6 = fee_rate as u32 * 100;
+    // Orca fee_rate is already in 1e-6 units (e.g., 3000 = 0.3%)
+    // No conversion needed — same units as our CLMM math
+    let fee_rate_1e6 = fee_rate as u32;
 
     // Derive oracle PDA
     let (oracle, _) = Pubkey::find_program_address(
