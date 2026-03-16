@@ -21,7 +21,7 @@ use solana_sdk::pubkey;
 use solana_sdk::pubkey::Pubkey;
 
 use crate::pool::decoder;
-use crate::pool::state::{DexType, PoolState};
+use crate::pool::state::{DexType, PoolMath, PoolState};
 use crate::pool::streamer::PoolStreamer;
 
 const WSOL: Pubkey = pubkey!("So11111111111111111111111111111111111111112");
@@ -228,12 +228,134 @@ pub async fn bootstrap_pools(streamer: &Arc<PoolStreamer>, gpa_rpc_url: &str) {
         tokio::task::yield_now().await;
     }
 
+    info!(
+        "[GPA] Phase 2 complete: {} vault balances fetched ({} failed) in {:.1}s",
+        fetched_count, failed_count, vault_start.elapsed().as_secs_f64(),
+    );
+
+    // ── Phase 3: Fetch bin/tick arrays for cross-DEX pools ──
+    // Only fetch for pools whose non-SOL mint also appears in a different DEX.
+    // This enables PumpSwap+DLMM, CPMM+CLMM, etc. arbitrage routes.
+    let phase3_start = Instant::now();
+    let mut bin_tick_fetched = 0usize;
+
+    // Build mint → dex_type set map from all cached pools
+    let mut mint_dex_map: std::collections::HashMap<Pubkey, HashSet<DexType>> =
+        std::collections::HashMap::new();
+    let all_pools: Vec<(Pubkey, Pubkey, Pubkey, DexType)> = {
+        let cache = streamer.cache();
+        cache.all_pool_addresses().iter().filter_map(|addr| {
+            cache.get(addr).map(|p| (p.address, p.mint_a, p.mint_b, p.dex_type))
+        }).collect()
+    };
+    for &(_, mint_a, mint_b, dex_type) in &all_pools {
+        mint_dex_map.entry(mint_a).or_default().insert(dex_type);
+        mint_dex_map.entry(mint_b).or_default().insert(dex_type);
+    }
+
+    // Find mints with 2+ DEX types (arbitrage candidates)
+    let multi_dex_mints: HashSet<Pubkey> = mint_dex_map.iter()
+        .filter(|(_, dex_types)| dex_types.len() >= 2)
+        .map(|(mint, _)| *mint)
+        .collect();
+
+    info!("[GPA] Phase 3: {} mints with 2+ DEX coverage, fetching bin/tick arrays...",
+        multi_dex_mints.len());
+
+    // Collect DLMM pools that need bin arrays
+    let dlmm_pools: Vec<(Pubkey, i32)> = {
+        let cache = streamer.cache();
+        all_pools.iter().filter_map(|&(addr, mint_a, mint_b, dex_type)| {
+            if dex_type != DexType::MeteoraDlmm {
+                return None;
+            }
+            // Only if one of the mints has multi-DEX coverage
+            if !multi_dex_mints.contains(&mint_a) && !multi_dex_mints.contains(&mint_b) {
+                return None;
+            }
+            // Get active_id from pool math
+            cache.get(&addr).and_then(|p| {
+                if let PoolMath::MeteoraDlmm { active_id, bin_arrays, .. } = &p.math {
+                    if bin_arrays.is_empty() {
+                        Some((addr, *active_id))
+                    } else {
+                        None // already has bin arrays
+                    }
+                } else {
+                    None
+                }
+            })
+        }).collect()
+    };
+
+    info!("[GPA] Fetching bin arrays for {} DLMM pools...", dlmm_pools.len());
+
+    // Batch fetch bin arrays: 3 PDAs per pool, use getMultipleAccounts
+    for chunk in dlmm_pools.chunks(16) {
+        // Collect all PDAs for this batch (up to 48, but getMultipleAccounts limit is 50)
+        let mut pda_requests: Vec<(Pubkey, Pubkey, i64)> = Vec::new(); // (pda, pool_addr, bin_array_index)
+        for &(pool_addr, active_id) in chunk {
+            let pdas = decoder::meteora_dlmm::bin_array_pdas_for_swap(&pool_addr, active_id);
+            let idx = decoder::meteora_dlmm::bin_id_to_bin_array_index(active_id);
+            for (i, pda) in pdas.iter().enumerate() {
+                pda_requests.push((*pda, pool_addr, idx as i64 - 1 + i as i64));
+            }
+        }
+
+        let pubkeys: Vec<Pubkey> = pda_requests.iter().map(|(pda, _, _)| *pda).collect();
+        match streamer.rpc().get_multiple_accounts(&pubkeys).await {
+            Ok(accounts) => {
+                // Group results by pool
+                let mut pool_bin_arrays: std::collections::HashMap<Pubkey, Vec<crate::pool::state::DlmmBinArray>> =
+                    std::collections::HashMap::new();
+                let mut pool_pdas: std::collections::HashMap<Pubkey, Vec<Pubkey>> =
+                    std::collections::HashMap::new();
+
+                for (i, maybe_account) in accounts.iter().enumerate() {
+                    if let Some(account) = maybe_account {
+                        let (pda, pool_addr, _) = pda_requests[i];
+                        if let Some(ba) = decoder::meteora_dlmm::decode_bin_array(&account.data) {
+                            pool_bin_arrays.entry(pool_addr).or_default().push(ba);
+                            pool_pdas.entry(pool_addr).or_default().push(pda);
+                            streamer.cache().register_tick_array(pda, pool_addr);
+                            bin_tick_fetched += 1;
+                        }
+                    }
+                }
+
+                // Update each pool's bin_arrays and extra_accounts
+                for (pool_addr, bin_arrays) in pool_bin_arrays {
+                    let pdas = pool_pdas.get(&pool_addr).cloned().unwrap_or_default();
+                    if let Some(mut pool) = streamer.cache().get_mut(&pool_addr) {
+                        if let PoolMath::MeteoraDlmm { bin_arrays: ref mut ba, .. } = pool.math {
+                            *ba = bin_arrays;
+                        }
+                        // Update extra_accounts: [oracle, bin_pda1, bin_pda2, ...]
+                        if !pool.extra_accounts.is_empty() {
+                            let oracle = pool.extra_accounts[0];
+                            let mut new_extra = vec![oracle];
+                            new_extra.extend(pdas);
+                            pool.extra_accounts = new_extra;
+                        }
+                    }
+                }
+            }
+            Err(e) => {
+                if bin_tick_fetched == 0 {
+                    warn!("[GPA] Bin array batch failed: {}", e);
+                }
+            }
+        }
+
+        tokio::task::yield_now().await;
+    }
+
     // Notify subscription updater
     streamer.subscription_dirty().store(true, std::sync::atomic::Ordering::Release);
     streamer.subscription_notify().notify_waiters();
 
     info!(
-        "[GPA] Bootstrap complete: {} pools, {} vault balances fetched ({} failed) in {:.1}s",
-        total_registered, fetched_count, failed_count, total_start.elapsed().as_secs_f64(),
+        "[GPA] Bootstrap complete: {} pools, {} vaults, {} bin/tick arrays in {:.1}s",
+        total_registered, fetched_count, bin_tick_fetched, total_start.elapsed().as_secs_f64(),
     );
 }

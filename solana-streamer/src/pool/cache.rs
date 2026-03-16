@@ -103,6 +103,10 @@ impl PoolStateCache {
         self.pools.get(address)
     }
 
+    pub fn get_mut(&self, address: &Pubkey) -> Option<dashmap::mapref::one::RefMut<'_, Pubkey, PoolState>> {
+        self.pools.get_mut(address)
+    }
+
     /// Number of vault addresses tracked in the reverse index.
     pub fn vault_count(&self) -> usize {
         self.vault_to_pool.len()
