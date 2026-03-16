@@ -91,6 +91,13 @@ fn get_price_tokens_per_sol(pool: &PoolState) -> Option<f64> {
         return None;
     }
 
+    // Skip CLMM/Whirlpool without tick arrays (would produce garbage quotes)
+    if let PoolMath::Concentrated { tick_arrays, fee_rate, .. } = &pool.math {
+        if tick_arrays.is_empty() || *fee_rate == 0 {
+            return None;
+        }
+    }
+
     let probe = 10_000_000u64; // 0.01 SOL to reduce slippage impact
     let out = pool.math.get_amount_out(probe, sol_is_a);
     if out == 0 {
@@ -462,19 +469,17 @@ async fn main() -> anyhow::Result<()> {
             let sim_profit_lamports = sol_back as i64 - sim_input as i64;
             let sim_profit_sol = sim_profit_lamports as f64 / 1e9;
 
-            if spread_pct > 0.5 {
+            if sim_profit_lamports > 0 && spread_pct < 50.0 {
+                arb_candidates += 1;
+                stat.1 += 1;
                 info!(
-                    "[PRICE] token={} | buy@{}({}) ${:.6} | sell@{}({}) ${:.6} | spread={:.2}% | sim_profit={:.6} SOL",
-                    &token_mint.to_string()[..8],
+                    "[ARB] token={} | buy@{}({}) ${:.6} | sell@{}({}) ${:.6} | spread={:.2}% | profit={:.6} SOL ({:.4}%)",
+                    token_mint,
                     buy_dex, &buy_pool.to_string()[..8], token_usd_buy,
                     sell_dex, &sell_pool.to_string()[..8], token_usd_sell,
                     spread_pct, sim_profit_sol,
+                    sim_profit_sol / (sim_input as f64 / 1e9) * 100.0,
                 );
-            }
-
-            if spread_pct > 1.0 {
-                arb_candidates += 1;
-                stat.1 += 1;
             }
 
             // Periodic summary
