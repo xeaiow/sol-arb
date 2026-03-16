@@ -34,9 +34,10 @@ async fn main() -> anyhow::Result<()> {
 
     let rpc = RpcClient::new(RPC.to_string());
 
-    // === Pool addresses ===
-    let pumpswap_pool: Pubkey = "GVQgwAg8HqhMVud7U7x3XgTkp7A1J6CS4B1eoPsFwKLQ".parse()?;
-    let dlmm_pool: Pubkey = "3EMXSmVSfaKPn6LVPHZVFn1s5ufvsB4R27wG6oS4bC92".parse()?;
+    // === Pool addresses (from reference tx Cd7uHS82...) ===
+    // FDQ77aHDgV6o token — smaller reserves, no u64 overflow
+    let pumpswap_pool: Pubkey = "ED41PwcJhsPgbUHQb4LZJbWzFXtcEC6RAherWC2YgEU3".parse()?;
+    let dlmm_pool: Pubkey = "6Jq5BtZ6ExjBgY4PU7jnVWgV9jzbQuWGQZVrvNvDbABP".parse()?;
 
     // === Decode PumpSwap pool ===
     let ps_data = rpc.get_account_data(&pumpswap_pool).await?;

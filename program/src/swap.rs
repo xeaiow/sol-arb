@@ -350,7 +350,7 @@ fn swap_pumpswap(accounts: &[AccountView], is_a_to_b: bool, amount_in: u64) -> P
         };
         let args = dex_pinocchio_cpi::pump_fun_amm::SellArgs {
             base_amount_in: amount_in,
-            min_quote_amount_out: 0,
+            min_quote_amount_out: 1,
         };
         dex_pinocchio_cpi::pump_fun_amm::sell(&sell_accounts, &args, &[])
     }
