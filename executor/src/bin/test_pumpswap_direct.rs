@@ -154,6 +154,10 @@ async fn main() -> anyhow::Result<()> {
         let (user_vol, _) = Pubkey::find_program_address(
             &[b"user_volume_accumulator", payer.pubkey().as_ref()], &pumpswap_prog,
         );
+        // pool_v2 PDA — REQUIRED, fixes Overflow (6023)
+        let (pool_v2, _) = Pubkey::find_program_address(
+            &[b"pool-v2", base_mint.as_ref()], &pumpswap_prog,
+        );
 
         // Create ATA if needed
         let create_ata_ix = create_ata_idempotent_ix(&payer.pubkey(), &payer.pubkey(), &base_mint, &base_token_prog);
@@ -185,6 +189,7 @@ async fn main() -> anyhow::Result<()> {
                 AccountMeta::new(user_vol, false),
                 AccountMeta::new_readonly(fee_config, false),
                 AccountMeta::new_readonly(fee_prog, false),
+                AccountMeta::new_readonly(pool_v2, false),  // pool_v2 PDA — fixes Overflow
             ],
             data: buy_data,
         };
@@ -240,6 +245,7 @@ async fn main() -> anyhow::Result<()> {
                         AccountMeta::new(user_vol, false),
                         AccountMeta::new_readonly(fee_config, false),
                         AccountMeta::new_readonly(fee_prog, false),
+                        AccountMeta::new_readonly(pool_v2, false),
                     ],
                     data: {
                         let mut d = vec![0u8; 25];
@@ -271,6 +277,11 @@ async fn main() -> anyhow::Result<()> {
         println!("No tokens to sell after buy attempt");
         return Ok(());
     }
+
+    // pool_v2 PDA — required for all PumpSwap instructions
+    let (pool_v2, _) = Pubkey::find_program_address(
+        &[b"pool-v2", base_mint.as_ref()], &pumpswap_prog,
+    );
 
     println!("\nSelling {} tokens directly via PumpSwap...", sell_amount);
 
@@ -305,9 +316,10 @@ async fn main() -> anyhow::Result<()> {
             AccountMeta::new_readonly(pumpswap_prog, false),
             AccountMeta::new(creator_vault_ata, false),
             AccountMeta::new_readonly(creator_vault_authority, false),
-            // remaining: fee_config, fee_program
+            // remaining: fee_config, fee_program, pool_v2
             AccountMeta::new_readonly(fee_config, false),
             AccountMeta::new_readonly(fee_prog, false),
+            AccountMeta::new_readonly(pool_v2, false),  // pool_v2 PDA — fixes Overflow
         ],
         data: sell_data,
     };
