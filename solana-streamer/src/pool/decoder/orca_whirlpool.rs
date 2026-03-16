@@ -153,7 +153,8 @@ pub fn tick_array_from_event(event: &OrcaWhirlpoolTickArrayAccountEvent, tick_sp
 ///   ticks: [Tick; 88]              offset 12 (each tick = 113 bytes)
 ///   whirlpool: Pubkey (32)         offset 12 + 88*113 = 9956
 pub fn decode_tick_array(data: &[u8], tick_spacing: u16) -> Option<TickArray> {
-    if data.len() < 9988 {
+    // Minimum: 8 (disc) + 4 (start_index) + at least 1 tick (113 bytes) = 125
+    if data.len() < 125 {
         return None;
     }
 
