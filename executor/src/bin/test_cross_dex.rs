@@ -37,21 +37,29 @@ async fn decode_pool(rpc: &RpcClient, addr: &str, dex: DexType, name: &'static s
         DexType::RaydiumAmmV4 => decoder::raydium_amm_v4::decode_bytes(&address, &data),
         DexType::MeteoraDlmm => decoder::meteora_dlmm::decode_bytes(&address, &data),
         DexType::OrcaWhirlpool => decoder::orca_whirlpool::decode_bytes(&address, &data),
+        DexType::RaydiumClmm => decoder::raydium_clmm::decode_bytes(&address, &data),
         _ => None,
     }.ok_or_else(|| anyhow::anyhow!("decode {} failed", name))?;
 
-    // For Whirlpool: fetch tick array PDAs and add to extra_accounts
-    // Order: current, current-1, current-2, current+1, current+2, etc.
-    // tx_builder picks [1..] and reorders by direction, so store them all
-    if dex == DexType::OrcaWhirlpool {
+    // For Whirlpool/CLMM: fetch tick array PDAs and add to extra_accounts
+    if dex == DexType::OrcaWhirlpool || dex == DexType::RaydiumClmm {
         if let PoolMath::Concentrated { tick_current, tick_spacing, .. } = &state.math {
-            let starts = decoder::orca_whirlpool::tick_array_start_indices(*tick_current, *tick_spacing);
+            let starts = if dex == DexType::OrcaWhirlpool {
+                decoder::orca_whirlpool::tick_array_start_indices(*tick_current, *tick_spacing)
+            } else {
+                decoder::raydium_clmm::tick_array_start_indices(*tick_current, *tick_spacing)
+            };
             // starts = [cur-3, cur-2, cur-1, cur, cur+1, cur+2, cur+3]
             // Store in order: current first, then both directions
-            let order = [3, 2, 4, 1, 5, 0, 6]; // cur, cur-1, cur+1, cur-2, cur+2, cur-3, cur+3
+            let order = [3, 2, 4, 1, 5, 0, 6];
             let mut loaded = 0;
             for &idx in &order {
-                if let Some(pda) = decoder::orca_whirlpool::tick_array_pda(&address, starts[idx]) {
+                let pda = if dex == DexType::OrcaWhirlpool {
+                    decoder::orca_whirlpool::tick_array_pda(&address, starts[idx])
+                } else {
+                    decoder::raydium_clmm::tick_array_pda(&address, starts[idx])
+                };
+                if let Some(pda) = pda {
                     if rpc.get_account(&pda).await.is_ok() {
                         state.extra_accounts.push(pda);
                         loaded += 1;
@@ -77,22 +85,35 @@ fn build_accounts(pool: &PoolInfo, is_a_to_b: bool) -> Vec<Pubkey> {
     if let Some(va) = pool.state.vault_a { accounts.push(va); }
     if let Some(vb) = pool.state.vault_b { accounts.push(vb); }
 
-    // For Whirlpool: extra_accounts = [oracle, ta_pda1, ta_pda2, ...]
-    // We need to pick the right 3 tick arrays based on direction.
-    // The decode_pool stores all 7 tick array PDAs after the oracle.
-    if pool.state.dex_type == DexType::OrcaWhirlpool {
+    let is_concentrated = pool.state.dex_type == DexType::OrcaWhirlpool
+        || pool.state.dex_type == DexType::RaydiumClmm;
+
+    if is_concentrated {
         if let PoolMath::Concentrated { tick_current, tick_spacing, .. } = &pool.state.math {
-            // Push oracle first
-            if let Some(oracle) = pool.state.extra_accounts.first() {
-                accounts.push(*oracle);
+            let is_whirlpool = pool.state.dex_type == DexType::OrcaWhirlpool;
+            let ticks_per_array: i32 = if is_whirlpool { 88 } else { 60 };
+
+            // CLMM extra_accounts = [amm_config, observation_key, ta_pda...]
+            // Whirlpool extra_accounts = [oracle, ta_pda...]
+            let fixed_extras = if is_whirlpool { 1 } else { 2 };
+            for ea in pool.state.extra_accounts.iter().take(fixed_extras) {
+                accounts.push(*ea);
             }
 
             let ts = *tick_spacing as i32;
-            let ticks_in_array = ts * 88;
+            let ticks_in_array = ts * ticks_per_array;
 
-            // For b_to_a: shift by tick_spacing
-            let ref_tick = if !is_a_to_b { *tick_current + ts } else { *tick_current };
-            let current_start = decoder::orca_whirlpool::tick_array_start_index(ref_tick, *tick_spacing);
+            // For Whirlpool b_to_a: shift by tick_spacing
+            let ref_tick = if is_whirlpool && !is_a_to_b {
+                *tick_current + ts
+            } else {
+                *tick_current
+            };
+            let current_start = if is_whirlpool {
+                decoder::orca_whirlpool::tick_array_start_index(ref_tick, *tick_spacing)
+            } else {
+                decoder::raydium_clmm::tick_array_start_index(ref_tick, *tick_spacing)
+            };
 
             // Compute 3 tick array PDAs in direction order
             let offsets: [i32; 3] = if is_a_to_b {
@@ -102,7 +123,12 @@ fn build_accounts(pool: &PoolInfo, is_a_to_b: bool) -> Vec<Pubkey> {
             };
             for offset in &offsets {
                 let start = current_start + offset * ticks_in_array;
-                if let Some(pda) = decoder::orca_whirlpool::tick_array_pda(&pool.address, start) {
+                let pda = if is_whirlpool {
+                    decoder::orca_whirlpool::tick_array_pda(&pool.address, start)
+                } else {
+                    decoder::raydium_clmm::tick_array_pda(&pool.address, start)
+                };
+                if let Some(pda) = pda {
                     accounts.push(pda);
                 }
             }
@@ -252,6 +278,16 @@ async fn main() -> anyhow::Result<()> {
 
     // Test 3: CPMM buy → Whirlpool sell (SOL/USDC) — tests Whirlpool sell (b_to_a)
     test_cross(&rpc, &payer, &config, &cpmm_usdc, &whirlpool).await?;
+
+    // --- CLMM cross-DEX tests ---
+    // Raydium CLMM SOL/USDC pool (highest liquidity from Raydium API)
+    let clmm = decode_pool(&rpc, "3ucNos4NbumPLZNWztqGHNFFgkHeRMBQAVemeeomsUxv",
+        DexType::RaydiumClmm, "CLMM").await?;
+    println!("\n--- CLMM cross-DEX tests ---");
+    // Test 4: CLMM buy → CPMM sell (SOL/USDC)
+    test_cross(&rpc, &payer, &config, &clmm, &cpmm_usdc).await?;
+    // Test 5: CPMM buy → CLMM sell (SOL/USDC)
+    test_cross(&rpc, &payer, &config, &cpmm_usdc, &clmm).await?;
 
     Ok(())
 }
