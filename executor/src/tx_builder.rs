@@ -718,6 +718,11 @@ impl TxBuilder {
                     &[b"fee_config", PUMPSWAP_PROGRAM.as_ref()],
                     &PUMPSWAP_FEE_PROGRAM,
                 );
+                // pool_v2 PDA: ["pool-v2", base_mint] — required to prevent Overflow
+                let (pool_v2, _) = Pubkey::find_program_address(
+                    &[b"pool-v2", base_mint.as_ref()],
+                    &PUMPSWAP_PROGRAM,
+                );
                 vec![
                     AccountMeta::new(pool, false),                                  // [0] pool
                     AccountMeta::new(self.payer_pubkey, true),                      // [1] user
@@ -742,6 +747,7 @@ impl TxBuilder {
                     AccountMeta::new(user_volume_acc, false),                       // [20] user_volume_accumulator
                     AccountMeta::new_readonly(fee_config, false),                   // [21] fee_config
                     AccountMeta::new_readonly(PUMPSWAP_FEE_PROGRAM, false),         // [22] fee_program
+                    AccountMeta::new_readonly(pool_v2, false),                      // [23] pool_v2 PDA
                 ]
             }
 

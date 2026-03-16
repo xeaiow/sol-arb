@@ -38,7 +38,7 @@ impl DexType {
             DexType::RaydiumCpmm => 14,
             DexType::RaydiumClmm => 10, // base only; extra tick arrays added via extra_accounts
             DexType::PumpFun => 16,
-            DexType::PumpSwap => 23,
+            DexType::PumpSwap => 24, // 19 formal + 5 remaining (vol×2, fee×2, pool_v2)
             DexType::Bonk => 17,
             DexType::MeteoraDammV2 => 14,
             DexType::MeteoraDlmm => 16, // 16 fixed + remaining bin_arrays via extra_accounts

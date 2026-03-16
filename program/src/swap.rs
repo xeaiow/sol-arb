@@ -299,7 +299,7 @@ fn swap_pumpswap(accounts: &[AccountView], is_a_to_b: bool, amount_in: u64) -> P
         data[16..24].copy_from_slice(&1u64.to_le_bytes()); // min_base_amount_out = 1
         data[24] = 1; // track_volume = true (OptionBool)
 
-        // 19 formal accounts + 4 remaining (global_vol, user_vol, fee_config, fee_program)
+        // 19 formal + 5 remaining (global_vol, user_vol, fee_config, fee_program, pool_v2)
         let instruction_accounts = [
             InstructionAccount::writable(accounts[0].address()),           // [0] pool
             InstructionAccount::writable_signer(accounts[1].address()),    // [1] user
@@ -325,14 +325,15 @@ fn swap_pumpswap(accounts: &[AccountView], is_a_to_b: bool, amount_in: u64) -> P
             InstructionAccount::writable(accounts[20].address()),          // user_volume_accumulator
             InstructionAccount::readonly(accounts[21].address()),          // fee_config
             InstructionAccount::readonly(accounts[22].address()),          // fee_program
+            InstructionAccount::readonly(accounts[23].address()),          // pool_v2 PDA
         ];
 
-        let views: [&AccountView; 23] = [
+        let views: [&AccountView; 24] = [
             &accounts[0], &accounts[1], &accounts[2], &accounts[3], &accounts[4],
             &accounts[5], &accounts[6], &accounts[7], &accounts[8], &accounts[9],
             &accounts[10], &accounts[11], &accounts[12], &accounts[13], &accounts[14],
             &accounts[15], &accounts[16], &accounts[17], &accounts[18],
-            &accounts[19], &accounts[20], &accounts[21], &accounts[22],
+            &accounts[19], &accounts[20], &accounts[21], &accounts[22], &accounts[23],
         ];
 
         let pumpswap_program = dex_pinocchio_cpi::pump_fun_amm::ID;
@@ -360,7 +361,7 @@ fn swap_pumpswap(accounts: &[AccountView], is_a_to_b: bool, amount_in: u64) -> P
         data[8..16].copy_from_slice(&amount_in.to_le_bytes());
         data[16..24].copy_from_slice(&1u64.to_le_bytes()); // min_quote_amount_out = 1
 
-        // 19 formal accounts + 2 remaining (fee_config, fee_program)
+        // 19 formal + 3 remaining (fee_config, fee_program, pool_v2)
         let instruction_accounts = [
             InstructionAccount::writable(accounts[0].address()),           // [0] pool
             InstructionAccount::writable_signer(accounts[1].address()),    // [1] user
@@ -384,14 +385,15 @@ fn swap_pumpswap(accounts: &[AccountView], is_a_to_b: bool, amount_in: u64) -> P
             // remaining accounts:
             InstructionAccount::readonly(accounts[21].address()),          // fee_config
             InstructionAccount::readonly(accounts[22].address()),          // fee_program
+            InstructionAccount::readonly(accounts[23].address()),          // pool_v2 PDA
         ];
 
-        let views: [&AccountView; 21] = [
+        let views: [&AccountView; 22] = [
             &accounts[0], &accounts[1], &accounts[2], &accounts[3], &accounts[4],
             &accounts[5], &accounts[6], &accounts[7], &accounts[8], &accounts[9],
             &accounts[10], &accounts[11], &accounts[12], &accounts[13], &accounts[14],
             &accounts[15], &accounts[16], &accounts[17], &accounts[18],
-            &accounts[21], &accounts[22],
+            &accounts[21], &accounts[22], &accounts[23],
         ];
 
         let pumpswap_program = dex_pinocchio_cpi::pump_fun_amm::ID;
