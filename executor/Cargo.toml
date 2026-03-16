@@ -34,6 +34,11 @@ quinn = "0.11"
 rustls = { version = "0.23", features = ["ring", "std"] }
 rcgen = "0.13"
 solana-account-decoder = "3.1.9"
+spl-associated-token-account = "6.0.0"
+
+[[bin]]
+name = "test_pumpswap_direct"
+path = "src/bin/test_pumpswap_direct.rs"
 
 [[bin]]
 name = "test_send_arb"
