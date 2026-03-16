@@ -149,6 +149,25 @@ async fn main() -> anyhow::Result<()> {
         }
     }
 
+    // === Debug: verify coin_creator PDA ===
+    {
+        let coin_creator = ps_state.extra_accounts.first().copied().unwrap_or_default();
+        let pumpswap_prog: Pubkey = "pAMMBay6oceH9fJKBRHGP5D4bD4sWpmSwMn52FMfXEA".parse()?;
+        let spl_token: Pubkey = "TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA".parse()?;
+        let (authority, _) = Pubkey::find_program_address(
+            &[b"creator_vault", coin_creator.as_ref()], &pumpswap_prog,
+        );
+        let ata_prog: Pubkey = "ATokenGPvbdGVxr1b2hvZbsiqW5xWH25efTNsLJA8knL".parse()?;
+        let (ata, _) = Pubkey::find_program_address(
+            &[authority.as_ref(), spl_token.as_ref(), ps_state.mint_b.as_ref()], &ata_prog,
+        );
+        println!("coin_creator: {}", coin_creator);
+        println!("vault_authority PDA: {}", authority);
+        println!("vault_ata: {}", ata);
+        println!("Expected authority: 6woDuTPMCtNVxv6ox6ZPnYKNaa2o3rQ4rkHDLSdnXJvA");
+        println!("Expected ata: 5MtD9ezEw5nznz8SxrYEju2Aenoh8e5haWHM2oKS9nRz");
+    }
+
     // === Build quote ===
     // Correct direction: DLMM buy (SOL → token) then PumpSwap sell (token → SOL)
     // DLMM: mint_a = token, mint_b = SOL → buy token = is_a_to_b = false (SOL in, token out)
