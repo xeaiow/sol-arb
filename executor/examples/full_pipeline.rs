@@ -9,7 +9,7 @@
 use std::collections::HashSet;
 use std::sync::Arc;
 
-use arb_engine::engine::Engine;
+use arb_engine::arb_scanner::ArbScanner;
 use arb_executor::config::ExecutorConfigFile;
 use arb_executor::executor::Executor;
 use solana_sdk::signer::keypair::read_keypair_file;
@@ -100,9 +100,16 @@ async fn main() -> anyhow::Result<()> {
     let tick_notify = pool_streamer.tick_reload_notify();
     eprintln!("Stage 1 (PoolStreamer) ready");
 
-    // ── Stage 2: Engine ─────────────────────────────────────────────────
-    let (engine, opp_rx) = Engine::new(engine_config, update_rx);
-    eprintln!("Stage 2 (Engine) ready");
+    // ── Stage 2: ArbScanner (cross-DEX price comparison) ────────────────
+    let (opp_tx, opp_rx) = tokio::sync::mpsc::channel(4096);
+    let probe_amount = engine_config.probe_amount_lamports;
+    let mut arb_scanner = ArbScanner::new(
+        pool_streamer.cache(),
+        update_rx,
+        opp_tx,
+        probe_amount,
+    );
+    eprintln!("Stage 2 (ArbScanner) ready");
 
     // ── Stage 3: Executor ───────────────────────────────────────────────
     // Extract gPA config before executor_config is moved
@@ -283,8 +290,8 @@ async fn main() -> anyhow::Result<()> {
 
     // ── Run all stages concurrently ─────────────────────────────────────
     tokio::select! {
-        _ = engine.run() => {
-            eprintln!("Engine exited");
+        _ = arb_scanner.run() => {
+            eprintln!("ArbScanner exited");
         }
         _ = executor.run() => {
             eprintln!("Executor exited");

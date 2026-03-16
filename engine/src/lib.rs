@@ -1,3 +1,4 @@
+pub mod arb_scanner;
 pub mod config;
 pub mod engine;
 pub mod graph;
