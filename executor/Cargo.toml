@@ -35,6 +35,10 @@ rcgen = "0.13"
 solana-account-decoder = "3.1.9"
 
 [[bin]]
+name = "test_arb_quote"
+path = "src/bin/test_arb_quote.rs"
+
+[[bin]]
 name = "test_quic_direct"
 path = "src/bin/test_quic_direct.rs"
 
