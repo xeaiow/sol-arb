@@ -69,13 +69,22 @@ impl Scanner {
         let full_scan_interval =
             tokio::time::Duration::from_secs(self.config.full_scan_interval_secs);
         let mut full_scan_timer = tokio::time::interval(full_scan_interval);
-        // First tick fires immediately; skip it
         full_scan_timer.tick().await;
 
         loop {
             tokio::select! {
                 Some(update) = self.update_rx.recv() => {
                     self.handle_update(update);
+                    // Drain all pending updates — update graph only, skip per-update scan.
+                    // Full scan runs every 30s and catches everything.
+                    let mut drained = 0u32;
+                    while let Ok(u) = self.update_rx.try_recv() {
+                        self.handle_update_graph_only(u);
+                        drained += 1;
+                        if drained % 50_000 == 0 {
+                            break; // yield to full_scan timer
+                        }
+                    }
                 }
                 _ = full_scan_timer.tick() => {
                     if matches!(self.phase, Phase::Running) {
@@ -84,6 +93,25 @@ impl Scanner {
                 }
             }
         }
+    }
+
+    /// Fast path: only update graph data, skip route building and scanning.
+    /// Used for batch-draining channel backlog. Full scan picks up changes later.
+    fn handle_update_graph_only(&mut self, update: PoolUpdate) {
+        let entry = PoolEntry {
+            address: update.pool_address,
+            mint_a: update.mint_a,
+            mint_b: update.mint_b,
+            math: update.math,
+            dex_type: update.dex_type,
+            vault_a: update.vault_a,
+            vault_b: update.vault_b,
+            mint_a_is_2022: update.mint_a_is_2022,
+            mint_b_is_2022: update.mint_b_is_2022,
+            extra_accounts: update.extra_accounts,
+            last_updated_slot: update.slot,
+        };
+        self.graph.add_pool(entry);
     }
 
     fn handle_update(&mut self, update: PoolUpdate) {
@@ -283,46 +311,9 @@ impl Scanner {
     fn full_scan(&mut self) {
         let start = Instant::now();
 
-        // --- Dead pool pruning ---
-        let pool_count = self.graph.pool_count();
-        let mut dead_pools: Vec<u32> = Vec::new();
-        for i in 0..pool_count {
-            let pool = &self.graph.pools[i];
-            if pool.last_updated_slot == 0 {
-                continue;
-            }
-            if let PoolMath::ConstantProduct { reserve_a, reserve_b, .. } = &pool.math {
-                if *reserve_a == 0 && *reserve_b == 0 {
-                    continue;
-                }
-            }
-            if pool.dex_type == DexType::RaydiumClmm {
-                if let PoolMath::Concentrated { tick_arrays, .. } = &pool.math {
-                    if tick_arrays.is_empty() {
-                        continue;
-                    }
-                }
-            }
-            if self.graph.is_pool_dead(i as u32) {
-                dead_pools.push(i as u32);
-            }
-        }
-
-        if !dead_pools.is_empty() {
-            for &pi in &dead_pools {
-                self.graph.remove_pool_edges(pi);
-            }
-            let routes_before = self.route_table.routes.len();
-            self.route_table.remove_routes_with_pools(&dead_pools);
-            let routes_after = self.route_table.routes.len();
-            info!(
-                "Pruned {} dead pools, removed {} routes ({} -> {})",
-                dead_pools.len(),
-                routes_before - routes_after,
-                routes_before,
-                routes_after,
-            );
-        }
+        // Dead pool pruning disabled — too aggressive during bootstrap.
+        // Pools with reserves=0 are naturally filtered by probe (output=0 → probe_neg).
+        // Full scan's min_reserve check handles the filtering.
 
         // --- Clear dedup map (allow re-evaluation of previously seen routes) ---
         self.recent_emissions.clear();
