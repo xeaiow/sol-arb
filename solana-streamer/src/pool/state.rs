@@ -142,14 +142,25 @@ impl PoolMath {
                 if amt_after_fee == 0 {
                     return 0;
                 }
-                // All intermediate math uses u128 — no overflow possible for u64 inputs.
-                // PumpSwap's buy_exact_quote_in uses u128 intermediate (confirmed by
-                // testing: amt * reserve_a can reach 7.97e22, fits u128 not u64).
                 let ri = r_in as u128;
                 let ro = r_out as u128;
-                // Floor division: output = (amt_after_fee * r_out) / (r_in + amt_after_fee)
-                let numerator = amt_after_fee * ro;
-                let denominator = ri + amt_after_fee;
+                // PumpSwap uses u64 intermediate math in buy.rs:701.
+                // If amt * r_out overflows u64, cap input to max safe amount.
+                // Raydium CPMM uses u128 so this cap only triggers for PumpSwap-scale
+                // reserves (>10T tokens). The cap still produces a valid quote for the
+                // maximum tradeable amount.
+                let safe_amt = if amt_after_fee * ro > u64::MAX as u128 {
+                    if ro == 0 { return 0; }
+                    u64::MAX as u128 / ro
+                } else {
+                    amt_after_fee
+                };
+                if safe_amt == 0 {
+                    return 0;
+                }
+                // Floor division: output = (safe_amt * r_out) / (r_in + safe_amt)
+                let numerator = safe_amt * ro;
+                let denominator = ri + safe_amt;
                 let out = numerator / denominator;
                 out as u64
             }
