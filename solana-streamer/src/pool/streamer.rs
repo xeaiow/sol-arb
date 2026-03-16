@@ -789,6 +789,11 @@ impl PoolStreamer {
         }
     }
 
+    /// Queue an account address for gRPC subscription.
+    pub async fn queue_subscription(&self, address: String) {
+        self.pending_subscriptions.lock().await.push(address);
+    }
+
     /// Drain pending subscription addresses (call before update_subscription)
     pub async fn drain_pending_subscriptions(&self) -> Vec<String> {
         let mut pending = self.pending_subscriptions.lock().await;

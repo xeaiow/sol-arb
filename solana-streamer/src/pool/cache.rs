@@ -25,6 +25,8 @@ pub struct PoolStateCache {
     vault_to_pool: DashMap<Pubkey, Pubkey>,
     /// Reverse index: tick array address → pool address
     tick_array_to_pool: DashMap<Pubkey, Pubkey>,
+    /// Reverse index: token mint → Vec<pool address> (for cross-DEX arb)
+    mint_to_pools: DashMap<Pubkey, Vec<Pubkey>>,
     /// Channel to emit updates to downstream consumers
     update_tx: mpsc::Sender<PoolUpdate>,
     /// Queue of CLMM pools that need tick array reload
@@ -42,6 +44,7 @@ impl PoolStateCache {
             pools: DashMap::new(),
             vault_to_pool: DashMap::new(),
             tick_array_to_pool: DashMap::new(),
+            mint_to_pools: DashMap::new(),
             update_tx,
             tick_reload_queue: tokio::sync::Mutex::new(Vec::new()),
             bin_array_reload_queue: tokio::sync::Mutex::new(Vec::new()),
@@ -90,7 +93,20 @@ impl PoolStateCache {
         };
         let _ = self.update_tx.try_send(update);
 
+        // Update mint→pools index
+        for mint in [pool.mint_a, pool.mint_b] {
+            let mut entry = self.mint_to_pools.entry(mint).or_default();
+            if !entry.contains(&address) {
+                entry.push(address);
+            }
+        }
+
         self.pools.insert(address, pool);
+    }
+
+    /// Get all pool addresses for a given token mint.
+    pub fn pools_for_mint(&self, mint: &Pubkey) -> Vec<Pubkey> {
+        self.mint_to_pools.get(mint).map(|v| v.clone()).unwrap_or_default()
     }
 
     /// Check if a pool exists by address.
