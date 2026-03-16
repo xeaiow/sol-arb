@@ -193,60 +193,22 @@ async fn main() -> anyhow::Result<()> {
     // Test 2: PumpSwap buy → DLMM sell (reverse direction)
     test_cross(&rpc, &payer, &config, &pumpswap, &dlmm).await?;
 
-    // Now find CPMM and DammV2 pools for the SAME token to test more combos
-    // Use a different token that has CPMM + DammV2
-    // SOL/USDC exists on both CPMM and DammV2
-    let cpmm = decode_pool(&rpc, "1JsUxxEZcFCob7z2Tt16cFBoyAuAzemJL6MCcLWpdnW",
-        DexType::RaydiumCpmm, "CPMM").await?;
-
-    // Find a DammV2 pool with same token as CPMM
-    let cpmm_token = if cpmm.state.mint_a.to_string().starts_with("So1111") {
-        cpmm.state.mint_b
-    } else {
-        cpmm.state.mint_a
-    };
-    println!("\nCPMM token: {}", cpmm_token);
-
-    // Test 3: CPMM buy → CPMM sell (same pool roundtrip, already tested)
-    // Skip — already confirmed
-
-    // Test 4: Find a DammV2 + AMM V4 combo
-    // AMM V4 SOL/USDC pool
+    // SOL/USDC pools on 3 DEXes — real cross-DEX tests
     let ammv4 = decode_pool(&rpc, "58oQChx4yWmvKdwLLZzBi4ChoCc2fqCUWBkwMihLYQo2",
         DexType::RaydiumAmmV4, "AMM V4").await?;
-
-    // DammV2 SOL/USDC
-    let dammv2 = decode_pool(&rpc, "DhNy8zGbcLAszBZ9n9XyJkPvjT2CUgqWD758hSaKZXzb",
+    let cpmm_usdc = decode_pool(&rpc, "47hq28mcL7q5GhBg7epyGF2dnuJd4MKFt8QhT7CzYUp4",
+        DexType::RaydiumCpmm, "CPMM").await?;
+    let dammv2_usdc = decode_pool(&rpc, "B5NKvGBqUUXUxqiAK5yjBzkBgtHX9LzcNU9A8aSxowK",
         DexType::MeteoraDammV2, "DammV2").await?;
 
-    // Check if they share a token (both SOL paired)
-    let ammv4_token = if ammv4.state.mint_a.to_string().starts_with("So1111") {
-        ammv4.state.mint_b
-    } else {
-        ammv4.state.mint_a
-    };
-    let dammv2_token = if dammv2.state.mint_a.to_string().starts_with("So1111") {
-        dammv2.state.mint_b
-    } else {
-        dammv2.state.mint_a
-    };
+    // Test 3: AMM V4 buy → CPMM sell (SOL/USDC)
+    test_cross(&rpc, &payer, &config, &ammv4, &cpmm_usdc).await?;
 
-    if ammv4_token == dammv2_token {
-        // Test 4: AMM V4 buy → DammV2 sell
-        test_cross(&rpc, &payer, &config, &ammv4, &dammv2).await?;
-        // Test 5: DammV2 buy → AMM V4 sell
-        test_cross(&rpc, &payer, &config, &dammv2, &ammv4).await?;
-    } else {
-        println!("\nAMM V4 token ({}) != DammV2 token ({}), skipping cross test", ammv4_token, dammv2_token);
-        // Do same-token roundtrip instead
-        // Test 4: AMM V4 buy → AMM V4 sell
-        test_cross(&rpc, &payer, &config, &ammv4, &ammv4).await?;
-        // Test 5: DammV2 buy → DammV2 sell
-        test_cross(&rpc, &payer, &config, &dammv2, &dammv2).await?;
-    }
+    // Test 4: CPMM buy → DammV2 sell (SOL/USDC)
+    test_cross(&rpc, &payer, &config, &cpmm_usdc, &dammv2_usdc).await?;
 
-    // Test 6: CPMM buy → CPMM sell (different token)
-    test_cross(&rpc, &payer, &config, &cpmm, &cpmm).await?;
+    // Test 5: DammV2 buy → AMM V4 sell (SOL/USDC)
+    test_cross(&rpc, &payer, &config, &dammv2_usdc, &ammv4).await?;
 
     Ok(())
 }
