@@ -62,12 +62,33 @@ async fn build_mint_index(cache: &Arc<PoolStateCache>) -> HashMap<Pubkey, Vec<(P
     index
 }
 
+const MIN_SOL_RESERVE: u64 = 5_000_000_000; // 5 SOL minimum liquidity
+
+/// Get SOL reserve of a pool (vault balance for the SOL side)
+fn get_sol_reserve(pool: &PoolState) -> u64 {
+    let wsol: Pubkey = WSOL.parse().unwrap();
+    let sol_is_a = pool.mint_a == wsol;
+    match &pool.math {
+        PoolMath::ConstantProduct { reserve_a, reserve_b, .. } => {
+            if sol_is_a { *reserve_a } else { *reserve_b }
+        }
+        // For non-CP pools, we can't easily get SOL reserve from math alone.
+        // Return u64::MAX to skip filtering (they have other quality checks).
+        _ => u64::MAX,
+    }
+}
+
 /// Get price from a pool: how many tokens per 1 SOL
 fn get_price_tokens_per_sol(pool: &PoolState) -> Option<f64> {
     let wsol: Pubkey = WSOL.parse().unwrap();
     let sol_is_a = pool.mint_a == wsol;
     if !sol_is_a && pool.mint_b != wsol {
-        return None; // Not a SOL pair
+        return None;
+    }
+
+    // Skip low-liquidity CP pools
+    if get_sol_reserve(pool) < MIN_SOL_RESERVE {
+        return None;
     }
 
     let probe = 10_000_000u64; // 0.01 SOL to reduce slippage impact
@@ -80,12 +101,27 @@ fn get_price_tokens_per_sol(pool: &PoolState) -> Option<f64> {
     Some(out as f64 / probe as f64 * 1_000_000_000.0)
 }
 
-/// Fetch fresh pool data from RPC for accurate comparison
+/// Fetch fresh pool data from RPC for accurate comparison.
+/// Returns None if SOL vault balance < MIN_SOL_RESERVE.
 async fn fetch_fresh_pool(rpc: &RpcClient, cache: &Arc<PoolStateCache>, pool_addr: &Pubkey, dex: DexType) -> Option<PoolState> {
-    // Start with cached pool (has mint info, vault addresses, etc)
     let mut pool = cache.get(pool_addr)?.clone();
+    let wsol: Pubkey = WSOL.parse().unwrap();
+    let sol_is_a = pool.mint_a == wsol;
 
-    // For CP pools: fetch live vault balances
+    // Fetch SOL vault balance and check liquidity for ALL pool types
+    let sol_vault = if sol_is_a { pool.vault_a } else { pool.vault_b };
+    if let Some(vault) = sol_vault {
+        if let Ok(data) = rpc.get_account_data(&vault).await {
+            if data.len() >= 72 {
+                let sol_bal = u64::from_le_bytes(data[64..72].try_into().unwrap_or([0; 8]));
+                if sol_bal < MIN_SOL_RESERVE {
+                    return None; // Skip low-liquidity pool
+                }
+            }
+        }
+    }
+
+    // For CP pools: fetch live vault balances (both sides)
     if matches!(pool.math, PoolMath::ConstantProduct { .. }) {
         if let (Some(va), Some(vb)) = (pool.vault_a, pool.vault_b) {
             for (vault, is_a) in [(va, true), (vb, false)] {
