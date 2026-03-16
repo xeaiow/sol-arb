@@ -23,13 +23,15 @@ dex-pinocchio-cpi/ — DEX CPI 封裝（自開發，需 git pull 才有）
 ### 關鍵檔案
 - `solana-streamer/src/pool/state.rs` — DexType, PoolMath, PoolState
 - `solana-streamer/src/pool/cache.rs` — PoolStateCache（update_math 需保留 CP reserves 和 fees）
-- `solana-streamer/src/pool/decoder/` — 7 DEX decoders
+- `solana-streamer/src/pool/decoder/` — 9 DEX decoders
 - `solana-streamer/src/pool/streamer.rs` — PoolStreamer integration
 - `engine/src/optimizer.rs` — simulate_route_profit, find_optimal_amount, clmm_cap_input
 - `engine/src/scanner.rs` — Scanner（warmup + incremental/full scan）
 - `executor/src/tx_builder.rs` — 交易組裝（priority fee, swap 指令, ALT）
 - `executor/src/config.rs` — ExecutorConfigFile 設定結構
 - `executor/config.toml` — 執行設定（**含 API key，已 gitignore**）
+- `executor/src/bin/test_cross_dex.rs` — Cross-DEX CPI 驗證工具（支援全部 DEX）
+- `executor/src/bin/test_dex_cpi.rs` — 單一 DEX CPI 驗證工具
 
 ## 已踩過的坑（Production Lessons）
 
@@ -75,16 +77,28 @@ dex-pinocchio-cpi/ — DEX CPI 封裝（自開發，需 git pull 才有）
 - `SwapV2` 的 `sqrt_price_limit`：a_to_b 用 `MIN_SQRT_PRICE_X64 = 4295048016`，b_to_a 用 `MAX_SQRT_PRICE_X64`
 - Oracle PDA: `["oracle", whirlpool]`
 
+### CLMM/Whirlpool Tick Array 方向排列（重要）
+- **swap_v2 要求 tick arrays 按 swap 方向排列**，不是按距離排列
+- `a_to_b`（價格下降）：tick_array_0 包含 current tick，tick_array_1/2 是向下方向（descending start_index）
+- `b_to_a`（價格上升）：tick_array_0 包含 current tick，tick_array_1/2 是向上方向（ascending start_index）
+- **Whirlpool b_to_a 需要 shift**：起算點是 `tick_current + tick_spacing`（不是 `tick_current`），確保正確識別價格上移時的 tick array
+- Raydium CLMM 不需要 shift，兩個方向都從 `tick_current` 起算
+- 錯誤的排列會導致 `InvalidTickArraySequence (6023)`
+- `scanner.rs` 的 `build_pool_accounts()` 已根據 `is_a_to_b` 參數正確排列
+
 ### PumpSwap Buy/Sell 方向與帳戶佈局
 - PumpSwap `mint_a = base`（token），`mint_b = quote`（SOL）
 - **方向語意**：engine 的 `is_a_to_b=true`（base→quote）= **sell**，`is_a_to_b=false`（quote→base）= **buy**
 - swap.rs 的 `if !is_a_to_b` 分支是 buy，`else` 分支是 sell（**不要搞反**）
 - `input_ata_index`：sell(a_to_b) 讀 base[5]，buy(!a_to_b) 讀 quote[6]
 - Buy = 23 帳戶，Sell = 21 帳戶（Sell 沒有 `global_volume_accumulator` 和 `user_volume_accumulator`）
-- **off-chain 統一傳 23 帳戶（Buy 佈局）**，on-chain Sell 跳過 [19][20]，用 [21]=`fee_config`、[22]=`fee_program`
+- **off-chain 統一傳 24 帳戶（Buy 佈局 + pool_v2）**，on-chain Sell 跳過 [19][20]，用 [21]=`fee_config`、[22]=`fee_program`、[23]=`pool_v2`
 - 如果 Sell 用 [19] 作 `fee_config` 會導致 0xbbf (AccountOwnedByWrongProgram)——因為 [19] 是 volume accumulator PDA
 - `fee_config` PDA seeds: `["fee_config", PUMPSWAP_PROGRAM]` → `PUMPSWAP_FEE_PROGRAM`
-- `base_pool_account_count` = 23（固定，不分 buy/sell）
+- **`pool_v2` PDA**: seeds `["pool-v2", base_mint]` → `PUMPSWAP_PROGRAM`，**必須作為 accounts[23] 傳入**
+- 沒有 `pool_v2` 會導致 Overflow (6023)——PumpSwap 讀錯帳戶索引，操作 garbage data
+- `base_pool_account_count` = 24（固定，不分 buy/sell）
+- `track_volume` 是 `OptionBool` 型別（1 byte），不是 `[u8; 32]`
 
 ### Raydium CPMM Authority
 - 全域常數 `GpMZbSM2GgvTKHJirzeGfMFoaZ8UR2X7F4v8vHTvxFbL`，**不是** per-pool PDA
@@ -155,7 +169,7 @@ dex-pinocchio-cpi/ — DEX CPI 封裝（自開發，需 git pull 才有）
    - 淨損益（含/不含手續費）
    - 若失敗：錯誤碼、根因、建議修正方向
 
-RPC endpoint: 用 config.toml 中的 `rpc_url`，或 fallback 到 `https://mainnet.helius-rpc.com/?api-key=89ed37ec-971c-48e0-99db-921d578354e6`
+RPC endpoint: 用 config.toml 中的 `rpc_url`，或 fallback 到 `https://beta.helius-rpc.com/?api-key=89ed37ec-971c-48e0-99db-921d568354e6`
 
 ## 開發規範
 
@@ -200,12 +214,29 @@ RPC endpoint: 用 config.toml 中的 `rpc_url`，或 fallback 到 `https://mainn
 1. Raydium AMM V4 — ConstantProduct
 2. Raydium CPMM — ConstantProduct
 3. Raydium CLMM — Concentrated（有 tick boundary 限制）
-4. PumpFun — BondingCurve
+4. PumpFun — BondingCurve（幾乎不可能套利，大部分已遷移到 PumpSwap）
 5. PumpSwap — ConstantProduct
 6. BonkSwap — ConstantProduct
 7. Meteora DAMM V2 — DammV2Concentrated（Uniswap V3 風格 single-range CL，sqrt-price 數學）
 8. Meteora DLMM — ConstantProduct（bin-based，用 vault balance 近似報價）
 9. Orca Whirlpool — Concentrated（tick-based CLMM，與 Raydium CLMM 共用數學模型）
+
+### CPI 驗證狀態（2026-03-16）
+所有主要 DEX 的 cross-DEX CPI 已在 mainnet 上驗證通過（buy + sell 雙方向）：
+
+| DEX | 狀態 | 驗證過的 cross-DEX 組合 |
+|-----|:---:|---|
+| PumpSwap | ✅ | ↔ DLMM |
+| Meteora DLMM | ✅ | ↔ PumpSwap |
+| Raydium CPMM | ✅ | ↔ DammV2, AMM V4, Whirlpool, CLMM |
+| Meteora DammV2 | ✅ | ↔ CPMM, AMM V4, Whirlpool |
+| Raydium AMM V4 | ✅ | ↔ CPMM, DammV2 |
+| Orca Whirlpool | ✅ | ↔ DammV2, CPMM |
+| Raydium CLMM | ✅ | ↔ CPMM |
+| PumpFun | ⏭️ | 跳過（bonding curve 階段無套利價值） |
+| BonkSwap | ⏭️ | 跳過 |
+
+測試工具：`executor/src/bin/test_cross_dex.rs`、`executor/src/bin/test_dex_cpi.rs`
 
 ## getProgramAccounts 批量拉池（覆蓋面優化）
 
@@ -245,5 +276,5 @@ gRPC 只推送有交易的 pool，靜默池子不被發現。導致啟動後只�
 `executor/src/bin/test_gpa.rs`
 
 ## Backlog 重點
-- Raydium CLMM tick_arrays 完整支援
+- 跑 full pipeline 整合測試（所有 DEX CPI 已驗證通過）
 - 啟動時 getProgramAccounts 批量拉池子（見上方詳細分析）
