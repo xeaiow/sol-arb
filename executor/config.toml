@@ -1,22 +1,22 @@
 [general]
 keypair_path = "~/.config/solana/id.json"
-rpc_url = "https://beta.helius-rpc.com/?api-key=89ed37ec-971c-48e0-99db-921d568354e6"
-grpc_endpoint = "https://solana-yellowstone-grpc.publicnode.com:443"
-grpc_token = "a8be362b3dad184ed061a9b23a11b180d1551146c82f60c0ae12ffaf51b66a55"
+rpc_url = "http://45.157.234.194:8899"
+grpc_endpoint = "http://45.157.234.194:10001"
+grpc_token = ""
 log_level = "info,arb_engine::scanner=debug,solana_streamer_sdk::pool::streamer=debug"
 
 [engine]
 max_hops = 3
-warmup_secs = 30
-warmup_pool_count = 1000
+warmup_secs = 300
+warmup_pool_count = 500000
 full_scan_interval_secs = 30
-min_reserve_sol = 0.1
+min_reserve_sol = 1.0
 max_hop_fee = 0.02
 min_profit_sol = 0.0001
 max_input_sol = 100.0
 ternary_iterations = 10
-probe_amount_sol = 1.0
-max_profit_ratio = 50
+probe_amount_sol = 0.01
+max_profit_ratio = 0.1
 # base_mints = ["So11111111111111111111111111111111111111112", "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v"]
 
 [executor]

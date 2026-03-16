@@ -350,6 +350,24 @@ impl PoolStateCache {
         self.pools.iter().map(|r| *r.key()).collect()
     }
 
+    /// Re-emit a pool's current state to the engine channel.
+    pub fn re_emit_pool(&self, pool: &PoolState) {
+        let update = PoolUpdate {
+            pool_address: pool.address,
+            dex_type: pool.dex_type,
+            mint_a: pool.mint_a,
+            mint_b: pool.mint_b,
+            vault_a: pool.vault_a,
+            vault_b: pool.vault_b,
+            mint_a_is_2022: pool.mint_a_is_2022,
+            mint_b_is_2022: pool.mint_b_is_2022,
+            extra_accounts: pool.extra_accounts.clone(),
+            math: pool.math.clone(),
+            slot: pool.last_updated_slot,
+        };
+        let _ = self.update_tx.try_send(update);
+    }
+
     /// Register a tick array → pool mapping.
     pub fn register_tick_array(&self, tick_array_address: Pubkey, pool_address: Pubkey) {
         self.tick_array_to_pool.insert(tick_array_address, pool_address);

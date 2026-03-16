@@ -356,6 +356,39 @@ pub async fn bootstrap_pools(streamer: &Arc<PoolStreamer>, gpa_rpc_url: &str) {
     streamer.subscription_dirty().store(true, std::sync::atomic::Ordering::Release);
     streamer.subscription_notify().notify_waiters();
 
+    // ── Phase 4: Re-emit all pools with reserves to engine ──
+    // During bootstrap, vault balance updates may have been dropped or not yet
+    // consumed by the engine. Re-emit all pools with non-zero reserves so the
+    // engine graph has up-to-date data for full_scan.
+    let cache = streamer.cache();
+    let all_addrs = cache.all_pool_addresses();
+    let mut reemit_count = 0usize;
+    for addr in &all_addrs {
+        if let Some(pool) = cache.get(addr) {
+            // Only re-emit pools that have useful data (reserves or bin/tick arrays)
+            let has_data = match &pool.math {
+                PoolMath::ConstantProduct { reserve_a, reserve_b, .. } => {
+                    *reserve_a > 0 || *reserve_b > 0
+                }
+                PoolMath::Concentrated { tick_arrays, .. } => !tick_arrays.is_empty(),
+                PoolMath::DammV2Concentrated { liquidity, .. } => *liquidity > 0,
+                PoolMath::MeteoraDlmm { bin_arrays, .. } => !bin_arrays.is_empty(),
+                PoolMath::BondingCurve { .. } => true,
+            };
+            if has_data {
+                cache.re_emit_pool(&pool);
+                reemit_count += 1;
+            }
+        }
+        if reemit_count % 10_000 == 0 && reemit_count > 0 {
+            tokio::task::yield_now().await;
+        }
+    }
+    info!(
+        "[GPA] Phase 4: re-emitted {} pools with data to engine (of {} total)",
+        reemit_count, all_addrs.len(),
+    );
+
     info!(
         "[GPA] Bootstrap complete: {} pools, {} vaults, {} bin/tick arrays in {:.1}s",
         total_registered, fetched_count, bin_tick_fetched, total_start.elapsed().as_secs_f64(),
