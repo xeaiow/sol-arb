@@ -309,16 +309,20 @@ async fn main() -> anyhow::Result<()> {
     // Stats
     let mut comparisons = 0u64;
     let mut arb_candidates = 0u64;
-    let mut dex_pair_stats: HashMap<String, (u64, u64)> = HashMap::new(); // (comparisons, arb_found)
+    let mut updates_received = 0u64;
+    let mut updates_with_cross_dex = 0u64;
+    let mut dex_pair_stats: HashMap<String, (u64, u64)> = HashMap::new();
+    let run_start = Instant::now();
 
     eprintln!("\n=== Listening for gRPC updates, comparing cross-DEX prices ===\n");
 
-    // Process updates
     loop {
         let update = tokio::select! {
             Some(u) = update_rx.recv() => u,
             _ = tokio::signal::ctrl_c() => break,
         };
+
+        updates_received += 1;
 
         let wsol: Pubkey = WSOL.parse().unwrap();
         let token_mint = if update.mint_a == wsol {
@@ -326,10 +330,10 @@ async fn main() -> anyhow::Result<()> {
         } else if update.mint_b == wsol {
             update.mint_a
         } else {
-            continue; // Skip non-SOL pairs
+            continue;
         };
 
-        // Update mint index if new pool
+        // Update mint index
         {
             let mut idx = mint_index.write().await;
             let entry = idx.entry(token_mint).or_default();
@@ -338,7 +342,7 @@ async fn main() -> anyhow::Result<()> {
             }
         }
 
-        // Check if this token has pools on other DEXes
+        // Find other-DEX pools for same token
         let other_pools: Vec<(Pubkey, DexType)> = {
             let idx = mint_index.read().await;
             match idx.get(&token_mint) {
@@ -353,8 +357,9 @@ async fn main() -> anyhow::Result<()> {
         if other_pools.is_empty() {
             continue;
         }
+        updates_with_cross_dex += 1;
 
-        // Get price from the updated pool (use cache, it was just updated)
+        // Get triggered pool price
         let cache = pool_streamer.cache();
         let updated_pool = match cache.get(&update.pool_address) {
             Some(p) => p.clone(),
@@ -366,9 +371,7 @@ async fn main() -> anyhow::Result<()> {
             _ => continue,
         };
 
-        // Compare with each other-DEX pool
         for (other_addr, other_dex) in &other_pools {
-            // Fetch fresh data for the other pool
             let other_pool = match fetch_fresh_pool(&rpc, &pool_streamer.cache(), other_addr, *other_dex).await {
                 Some(p) => p,
                 None => continue,
@@ -379,60 +382,98 @@ async fn main() -> anyhow::Result<()> {
             };
 
             comparisons += 1;
-            let spread_pct = ((price_a - price_b) / price_b * 100.0).abs();
-            let pair_key = format!("{}-{}", dex_name(update.dex_type), dex_name(*other_dex));
-            let stat = dex_pair_stats.entry(pair_key.clone()).or_insert((0, 0));
+
+            // Determine buy/sell direction
+            let (buy_dex, buy_price, buy_pool, sell_dex, sell_price, sell_pool) = if price_a > price_b {
+                // pool A gives more tokens per SOL = cheaper to buy there
+                (dex_name(update.dex_type), price_a, update.pool_address,
+                 dex_name(*other_dex), price_b, *other_addr)
+            } else {
+                (dex_name(*other_dex), price_b, *other_addr,
+                 dex_name(update.dex_type), price_a, update.pool_address)
+            };
+
+            let spread_pct = (buy_price - sell_price) / sell_price * 100.0;
+            let pair_key = format!("{}-{}", buy_dex, sell_dex);
+            let stat = dex_pair_stats.entry(pair_key).or_insert((0, 0));
             stat.0 += 1;
 
-            // Log significant price differences
+            // Token price in USD
+            let sol_price_usd = 93.4;
+            let token_usd_buy = sol_price_usd / (buy_price / 1e6);
+            let token_usd_sell = sol_price_usd / (sell_price / 1e6);
+
+            // Simulate arb profit: buy 0.1 SOL worth, sell on other DEX
+            let sim_input = 100_000_000u64; // 0.1 SOL
+            let sol_is_a_buy = updated_pool.mint_a == wsol;
+            let tokens_bought = if update.pool_address == buy_pool {
+                updated_pool.math.get_amount_out(sim_input, sol_is_a_buy)
+            } else {
+                other_pool.math.get_amount_out(sim_input, other_pool.mint_a == wsol)
+            };
+
+            let sol_is_a_sell = if update.pool_address == sell_pool {
+                updated_pool.mint_a == wsol
+            } else {
+                other_pool.mint_a == wsol
+            };
+            let sol_back = if update.pool_address == sell_pool {
+                updated_pool.math.get_amount_out(tokens_bought, !sol_is_a_sell)
+            } else {
+                other_pool.math.get_amount_out(tokens_bought, !sol_is_a_sell)
+            };
+
+            let sim_profit_lamports = sol_back as i64 - sim_input as i64;
+            let sim_profit_sol = sim_profit_lamports as f64 / 1e9;
+
             if spread_pct > 0.5 {
-                let sol_price = 93.4;
-                let token_usd_a = sol_price / (price_a / 1e6); // price_a is in smallest units per SOL
-                let token_usd_b = sol_price / (price_b / 1e6);
-
-                let (cheaper, dearer) = if price_a > price_b {
-                    (dex_name(update.dex_type), dex_name(*other_dex))
-                } else {
-                    (dex_name(*other_dex), dex_name(update.dex_type))
-                };
-
                 info!(
-                    "[CROSS_DEX] {}.. | {} {:.0} vs {} {:.0} tok/SOL | spread={:.2}% | ${:.6} vs ${:.6} | buy@{} sell@{}",
+                    "[PRICE] token={} | buy@{}({}) ${:.6} | sell@{}({}) ${:.6} | spread={:.2}% | sim_profit={:.6} SOL",
                     &token_mint.to_string()[..8],
-                    dex_name(update.dex_type), price_a / 1e6,
-                    dex_name(*other_dex), price_b / 1e6,
-                    spread_pct,
-                    token_usd_a, token_usd_b,
-                    cheaper, dearer,
+                    buy_dex, &buy_pool.to_string()[..8], token_usd_buy,
+                    sell_dex, &sell_pool.to_string()[..8], token_usd_sell,
+                    spread_pct, sim_profit_sol,
                 );
-
-                if spread_pct > 1.0 {
-                    arb_candidates += 1;
-                    stat.1 += 1;
-                }
             }
 
-            // Print stats periodically
-            if comparisons % 100 == 0 {
+            if spread_pct > 1.0 {
+                arb_candidates += 1;
+                stat.1 += 1;
+            }
+
+            // Periodic summary
+            if comparisons % 200 == 0 {
+                let elapsed = run_start.elapsed().as_secs();
                 info!(
-                    "[STATS] comparisons={} arb_candidates={} (>{:.0}%)",
-                    comparisons, arb_candidates, 1.0,
+                    "[SUMMARY] {}s | updates={} cross_dex={} comparisons={} arb_signals={} ({:.1}%)",
+                    elapsed, updates_received, updates_with_cross_dex,
+                    comparisons, arb_candidates,
+                    if comparisons > 0 { arb_candidates as f64 / comparisons as f64 * 100.0 } else { 0.0 },
                 );
-                for (pair, (comp, arb)) in &dex_pair_stats {
-                    if *comp > 0 {
-                        info!("  {} : {} comparisons, {} arb signals", pair, comp, arb);
-                    }
+                let mut pairs: Vec<_> = dex_pair_stats.iter().collect();
+                pairs.sort_by(|a, b| b.1.1.cmp(&a.1.1));
+                for (pair, (comp, arb)) in pairs.iter().take(5) {
+                    info!("  {:>20} : {:>5} cmp, {:>5} arb ({:.0}%)",
+                        pair, comp, arb, if *comp > 0 { *arb as f64 / *comp as f64 * 100.0 } else { 0.0 });
                 }
             }
         }
     }
 
-    // Final stats
-    eprintln!("\n=== Final Stats ===");
-    eprintln!("Total comparisons: {}", comparisons);
-    eprintln!("Arb candidates (>1% spread): {}", arb_candidates);
-    for (pair, (comp, arb)) in &dex_pair_stats {
-        eprintln!("  {}: {} comparisons, {} arb signals", pair, comp, arb);
+    // Final report
+    eprintln!("\n========== FINAL REPORT ==========");
+    eprintln!("Runtime: {}s", run_start.elapsed().as_secs());
+    eprintln!("gRPC updates: {}", updates_received);
+    eprintln!("Updates with cross-DEX: {}", updates_with_cross_dex);
+    eprintln!("Price comparisons: {}", comparisons);
+    eprintln!("Arb signals (>1%): {}", arb_candidates);
+    eprintln!("\nDEX pair breakdown:");
+    let mut pairs: Vec<_> = dex_pair_stats.iter().collect();
+    pairs.sort_by(|a, b| b.1.1.cmp(&a.1.1));
+    eprintln!("{:<25} {:>8} {:>8} {:>8}", "Pair", "Compare", "Arb", "Rate");
+    for (pair, (comp, arb)) in &pairs {
+        eprintln!("{:<25} {:>8} {:>8} {:>7.1}%",
+            pair, comp, arb, if *comp > 0 { *arb as f64 / *comp as f64 * 100.0 } else { 0.0 });
     }
 
     Ok(())
