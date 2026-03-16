@@ -149,7 +149,9 @@ async fn main() -> anyhow::Result<()> {
     }
 
     // === Build quote ===
-    // PumpSwap buy: SOL → token (is_a_to_b = false, since mint_b = SOL)
+    // Correct direction: DLMM buy (SOL → token) then PumpSwap sell (token → SOL)
+    // DLMM: mint_a = token, mint_b = SOL → buy token = is_a_to_b = false (SOL in, token out)
+    // PumpSwap: mint_a = token, mint_b = SOL → sell token = is_a_to_b = true (token in, SOL out)
     let ps_math = PoolMath::ConstantProduct {
         reserve_a: ps_balance_a,
         reserve_b: ps_balance_b,
@@ -157,14 +159,30 @@ async fn main() -> anyhow::Result<()> {
         fee_denominator: 10000,
     };
 
-    // Try very small amount to avoid PumpSwap overflow
-    let input = 100_000u64; // 0.0001 SOL
-    let hop1_out = ps_math.get_amount_out(input, false); // SOL → token
-    let hop2_out = dlmm_state.math.get_amount_out(hop1_out, true); // token → SOL
-    let profit = hop2_out as i64 - input as i64;
+    let input = 10_000_000u64; // 0.01 SOL
 
-    println!("\nQuote: {:.4} SOL → {} tokens → {:.6} SOL | profit = {} lamports",
-        input as f64 / 1e9, hop1_out, hop2_out as f64 / 1e9, profit);
+    // Direction 1: DLMM buy → PumpSwap sell (correct, matching reference tx)
+    let hop1_out_dlmm = dlmm_state.math.get_amount_out(input, false); // SOL → token via DLMM
+    let hop2_out_ps = ps_math.get_amount_out(hop1_out_dlmm, true);     // token → SOL via PumpSwap sell
+    let profit1 = hop2_out_ps as i64 - input as i64;
+
+    println!("\n[Route A] DLMM buy → PumpSwap sell:");
+    println!("  {:.4} SOL → {} tokens → {:.6} SOL | profit = {} lamports",
+        input as f64 / 1e9, hop1_out_dlmm, hop2_out_ps as f64 / 1e9, profit1);
+
+    // Direction 2: PumpSwap buy → DLMM sell (our old direction, causes Overflow)
+    let hop1_out_ps = ps_math.get_amount_out(input, false); // SOL → token via PumpSwap buy
+    let hop2_out_dlmm = dlmm_state.math.get_amount_out(hop1_out_ps, true); // token → SOL via DLMM
+    let profit2 = hop2_out_dlmm as i64 - input as i64;
+
+    println!("[Route B] PumpSwap buy → DLMM sell:");
+    println!("  {:.4} SOL → {} tokens → {:.6} SOL | profit = {} lamports",
+        input as f64 / 1e9, hop1_out_ps, hop2_out_dlmm as f64 / 1e9, profit2);
+
+    // Use Route A (DLMM buy → PumpSwap sell) — no Overflow
+    let hop1_out = hop1_out_dlmm;
+    let hop2_out = hop2_out_ps;
+    let profit = profit1;
 
     if hop1_out == 0 || hop2_out == 0 {
         println!("Quote returned 0 — can't build tx");
@@ -174,33 +192,35 @@ async fn main() -> anyhow::Result<()> {
     // === Build Opportunity ===
     let wsol: Pubkey = WSOL.parse()?;
     let mut hops = arrayvec::ArrayVec::new();
-    hops.push(Hop { pool_index: 0, is_a_to_b: false }); // PumpSwap buy
-    hops.push(Hop { pool_index: 1, is_a_to_b: true });  // DLMM sell
+    hops.push(Hop { pool_index: 0, is_a_to_b: false }); // DLMM buy (SOL → token)
+    hops.push(Hop { pool_index: 1, is_a_to_b: true });  // PumpSwap sell (token → SOL)
 
     let opp = Opportunity {
         route: Route { hops, base_mint: wsol },
         amount_in: input,
         expected_profit: if profit > 0 { profit as u64 } else { 1000 }, // min 1000 for test
         pool_snapshots: vec![
-            PoolSnapshot {
-                address: pumpswap_pool,
-                dex_type: DexType::PumpSwap,
-                mint_a: ps_state.mint_a,
-                mint_b: ps_state.mint_b,
-                is_a_to_b: false,
-                mint_a_is_2022: true, // pump tokens are Token-2022
-                mint_b_is_2022: false,
-                accounts: ps_accounts,
-            },
+            // Hop 1: DLMM buy
             PoolSnapshot {
                 address: dlmm_pool,
                 dex_type: DexType::MeteoraDlmm,
                 mint_a: dlmm_state.mint_a,
                 mint_b: dlmm_state.mint_b,
-                is_a_to_b: true,
+                is_a_to_b: false,  // SOL → token (buy)
                 mint_a_is_2022: true, // pump tokens are Token-2022
                 mint_b_is_2022: false,
                 accounts: dlmm_accounts,
+            },
+            // Hop 2: PumpSwap sell
+            PoolSnapshot {
+                address: pumpswap_pool,
+                dex_type: DexType::PumpSwap,
+                mint_a: ps_state.mint_a,
+                mint_b: ps_state.mint_b,
+                is_a_to_b: true,   // token → SOL (sell)
+                mint_a_is_2022: true, // pump tokens are Token-2022
+                mint_b_is_2022: false,
+                accounts: ps_accounts,
             },
         ],
         slot: 0,
