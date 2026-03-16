@@ -322,6 +322,84 @@ impl Scanner {
         // --- Clear dedup map (allow re-evaluation of previously seen routes) ---
         self.recent_emissions.clear();
 
+        // --- Full route scan: probe ALL routes for opportunities ---
+        // Incremental scan only checks routes when a pool update arrives,
+        // but arb opportunities arise from price divergence across pools.
+        // Full scan catches opportunities where both pools changed independently.
+        {
+            let all_routes: Vec<(u32, Route)> = self.route_table.routes.iter()
+                .enumerate()
+                .map(|(i, r)| (i as u32, r.clone()))
+                .collect();
+
+            let probe_amount = self.config.probe_amount_lamports;
+            let min_reserve = self.config.min_reserve_lamports;
+            let graph = &self.graph;
+
+            use std::sync::atomic::{AtomicU32, Ordering as AtomOrd};
+            let rc = AtomicU32::new(0);
+            let pn = AtomicU32::new(0);
+
+            let mut probed: Vec<(u32, Route, i64)> = all_routes.into_par_iter()
+                .filter_map(|(idx, route)| {
+                    for hop in &route.hops {
+                        if !graph.pool_has_min_reserve(hop.pool_index, min_reserve) {
+                            rc.fetch_add(1, AtomOrd::Relaxed);
+                            return None;
+                        }
+                    }
+                    let profit = optimizer::simulate_route_profit(&route, graph, probe_amount);
+                    if profit > 0 {
+                        Some((idx, route, profit))
+                    } else {
+                        pn.fetch_add(1, AtomOrd::Relaxed);
+                        None
+                    }
+                })
+                .collect();
+
+            let no_res = rc.load(AtomOrd::Relaxed);
+            let neg = pn.load(AtomOrd::Relaxed);
+            let pos = probed.len();
+
+            if pos > 0 {
+                probed.sort_unstable_by(|a, b| b.2.cmp(&a.2));
+                let max_input = self.config.max_input_lamports;
+                let ternary_iters = self.config.ternary_iterations;
+                let min_profit = self.config.min_profit_lamports;
+                let max_profit_ratio = self.config.max_profit_ratio;
+                let max_abs_profit = self.config.max_absolute_profit_lamports;
+                let top_n = probed.len().min(10);
+
+                let evaluated: Vec<(Route, u64, u64)> = probed[..top_n].par_iter()
+                    .filter_map(|(_, route, _)| {
+                        let (amount_in, profit) = optimizer::find_optimal_amount(
+                            route, graph, max_input, ternary_iters,
+                        )?;
+                        if profit < min_profit { return None; }
+                        if amount_in > 0 && (profit as f64 / amount_in as f64) > max_profit_ratio {
+                            return None;
+                        }
+                        if profit > max_abs_profit { return None; }
+                        Some((route.clone(), amount_in, profit))
+                    })
+                    .collect();
+
+                let current_slot = self.graph.pools.iter()
+                    .map(|p| p.last_updated_slot)
+                    .max()
+                    .unwrap_or(0);
+                for (route, amount_in, profit) in evaluated {
+                    self.emit_opportunity(&route, current_slot, amount_in, profit);
+                }
+            }
+
+            info!(
+                "[FULL_SCAN] routes={} no_reserve={} probe_neg={} probe_pos={} elapsed={:?}",
+                self.route_table.routes.len(), no_res, neg, pos, start.elapsed(),
+            );
+        }
+
         // --- Stats log ---
         let mut dex_counts = [0usize; 7];
         let mut clmm_ready = 0usize;
