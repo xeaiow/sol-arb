@@ -286,73 +286,122 @@ fn swap_pumpfun(accounts: &[AccountView], is_a_to_b: bool, amount_in: u64) -> Pr
 fn swap_pumpswap(accounts: &[AccountView], is_a_to_b: bool, amount_in: u64) -> ProgramResult {
     if !is_a_to_b {
         // Buy: SOL (quote) → token (base), i.e. b→a
-        // Use buy_exact_quote_in: "spend amount_in quote, get at least 1 base".
-        // The old `buy` instruction takes base_amount_out (desired output) which
-        // we don't know — passing SOL lamports as base amount causes Overflow (0x1787).
-        let buy_accounts = dex_pinocchio_cpi::pump_fun_amm::BuyExactQuoteInAccounts {
-            pool: &accounts[0],
-            user: &accounts[1],
-            global_config: &accounts[2],
-            base_mint: &accounts[3],
-            quote_mint: &accounts[4],
-            user_base_token_account: &accounts[5],
-            user_quote_token_account: &accounts[6],
-            pool_base_token_account: &accounts[7],
-            pool_quote_token_account: &accounts[8],
-            protocol_fee_recipient: &accounts[9],
-            protocol_fee_recipient_token_account: &accounts[10],
-            base_token_program: &accounts[11],
-            quote_token_program: &accounts[12],
-            system_program: &accounts[13],
-            associated_token_program: &accounts[14],
-            event_authority: &accounts[15],
-            program: &accounts[16],
-            coin_creator_vault_ata: &accounts[17],
-            coin_creator_vault_authority: &accounts[18],
-            global_volume_accumulator: &accounts[19],
-            user_volume_accumulator: &accounts[20],
-            fee_config: &accounts[21],
-            fee_program: &accounts[22],
+        // PumpSwap buy_exact_quote_in has 19 formal accounts + volume/fee as remaining.
+        // Build CPI manually with invoke_signed_with_slice.
+        use pinocchio::cpi::invoke_signed_with_slice;
+        use pinocchio::instruction::{InstructionView, InstructionAccount};
+
+        // buy_exact_quote_in discriminator + args
+        let disc: [u8; 8] = [198, 46, 21, 82, 180, 217, 232, 112]; // BUY_EXACT_QUOTE_IN
+        let mut data = [0u8; 25]; // 8 disc + 8 spendable_quote_in + 8 min_base_amount_out + 1 track_volume
+        data[0..8].copy_from_slice(&disc);
+        data[8..16].copy_from_slice(&amount_in.to_le_bytes());
+        data[16..24].copy_from_slice(&1u64.to_le_bytes()); // min_base_amount_out = 1
+        data[24] = 1; // track_volume = true (OptionBool)
+
+        // 19 formal accounts + 4 remaining (global_vol, user_vol, fee_config, fee_program)
+        let instruction_accounts = [
+            InstructionAccount::writable(accounts[0].address()),           // [0] pool
+            InstructionAccount::writable_signer(accounts[1].address()),    // [1] user
+            InstructionAccount::readonly(accounts[2].address()),           // [2] global_config
+            InstructionAccount::readonly(accounts[3].address()),           // [3] base_mint
+            InstructionAccount::readonly(accounts[4].address()),           // [4] quote_mint
+            InstructionAccount::writable(accounts[5].address()),           // [5] user_base_ata
+            InstructionAccount::writable(accounts[6].address()),           // [6] user_quote_ata
+            InstructionAccount::writable(accounts[7].address()),           // [7] pool_base_vault
+            InstructionAccount::writable(accounts[8].address()),           // [8] pool_quote_vault
+            InstructionAccount::writable(accounts[9].address()),           // [9] protocol_fee_recipient
+            InstructionAccount::writable(accounts[10].address()),          // [10] protocol_fee_recipient_ata
+            InstructionAccount::readonly(accounts[11].address()),          // [11] base_token_program
+            InstructionAccount::readonly(accounts[12].address()),          // [12] quote_token_program
+            InstructionAccount::readonly(accounts[13].address()),          // [13] system
+            InstructionAccount::readonly(accounts[14].address()),          // [14] ata_program
+            InstructionAccount::readonly(accounts[15].address()),          // [15] event_authority
+            InstructionAccount::readonly(accounts[16].address()),          // [16] program
+            InstructionAccount::writable(accounts[17].address()),          // [17] coin_creator_vault_ata
+            InstructionAccount::readonly(accounts[18].address()),          // [18] coin_creator_vault_authority
+            // remaining accounts:
+            InstructionAccount::writable(accounts[19].address()),          // global_volume_accumulator
+            InstructionAccount::writable(accounts[20].address()),          // user_volume_accumulator
+            InstructionAccount::readonly(accounts[21].address()),          // fee_config
+            InstructionAccount::readonly(accounts[22].address()),          // fee_program
+        ];
+
+        let views: [&AccountView; 23] = [
+            &accounts[0], &accounts[1], &accounts[2], &accounts[3], &accounts[4],
+            &accounts[5], &accounts[6], &accounts[7], &accounts[8], &accounts[9],
+            &accounts[10], &accounts[11], &accounts[12], &accounts[13], &accounts[14],
+            &accounts[15], &accounts[16], &accounts[17], &accounts[18],
+            &accounts[19], &accounts[20], &accounts[21], &accounts[22],
+        ];
+
+        let pumpswap_program = dex_pinocchio_cpi::pump_fun_amm::ID;
+        let instruction = InstructionView {
+            program_id: &pumpswap_program,
+            accounts: &instruction_accounts,
+            data: &data,
         };
-        let args = dex_pinocchio_cpi::pump_fun_amm::BuyExactQuoteInArgs {
-            spendable_quote_in: amount_in,
-            min_base_amount_out: 1,
-            track_volume: 1,  // OptionBool: true (must be true to avoid Overflow in buy.rs:701)
-        };
-        dex_pinocchio_cpi::pump_fun_amm::buy_exact_quote_in(&buy_accounts, &args, &[])
+
+        invoke_signed_with_slice(&instruction, &views, &[])
     } else {
         // Sell: token (base) → SOL (quote), i.e. a→b
-        // Off-chain always sends 23 accounts in Buy layout.
-        // Sell has no volume accumulators — [19],[20] are unused padding.
-        // fee_config=[21], fee_program=[22] (same positions as Buy).
-        let sell_accounts = dex_pinocchio_cpi::pump_fun_amm::SellAccounts {
-            pool: &accounts[0],
-            user: &accounts[1],
-            global_config: &accounts[2],
-            base_mint: &accounts[3],
-            quote_mint: &accounts[4],
-            user_base_token_account: &accounts[5],
-            user_quote_token_account: &accounts[6],
-            pool_base_token_account: &accounts[7],
-            pool_quote_token_account: &accounts[8],
-            protocol_fee_recipient: &accounts[9],
-            protocol_fee_recipient_token_account: &accounts[10],
-            base_token_program: &accounts[11],
-            quote_token_program: &accounts[12],
-            system_program: &accounts[13],
-            associated_token_program: &accounts[14],
-            event_authority: &accounts[15],
-            program: &accounts[16],
-            coin_creator_vault_ata: &accounts[17],
-            coin_creator_vault_authority: &accounts[18],
-            fee_config: &accounts[21],
-            fee_program: &accounts[22],
+        // PumpSwap sell has 19 formal accounts + fee_config/fee_program as remaining accounts.
+        // Off-chain sends 23 accounts in Buy layout: [0-18] formal, [19-20] volume (padding),
+        // [21] fee_config, [22] fee_program.
+        // We build CPI manually with invoke_signed_with_slice to match the exact format
+        // that working arb programs use (19 + remaining accounts).
+        use pinocchio::cpi::invoke_signed_with_slice;
+        use pinocchio::instruction::{InstructionView, InstructionAccount};
+
+        // Sell discriminator + args
+        let disc: [u8; 8] = [51, 230, 133, 164, 1, 127, 131, 173]; // SELL
+        let mut data = [0u8; 24]; // 8 disc + 8 base_amount_in + 8 min_quote_amount_out
+        data[0..8].copy_from_slice(&disc);
+        data[8..16].copy_from_slice(&amount_in.to_le_bytes());
+        data[16..24].copy_from_slice(&1u64.to_le_bytes()); // min_quote_amount_out = 1
+
+        // 19 formal accounts + 2 remaining (fee_config, fee_program)
+        let instruction_accounts = [
+            InstructionAccount::writable(accounts[0].address()),           // [0] pool
+            InstructionAccount::writable_signer(accounts[1].address()),    // [1] user
+            InstructionAccount::readonly(accounts[2].address()),           // [2] global_config
+            InstructionAccount::readonly(accounts[3].address()),           // [3] base_mint
+            InstructionAccount::readonly(accounts[4].address()),           // [4] quote_mint
+            InstructionAccount::writable(accounts[5].address()),           // [5] user_base_ata
+            InstructionAccount::writable(accounts[6].address()),           // [6] user_quote_ata
+            InstructionAccount::writable(accounts[7].address()),           // [7] pool_base_vault
+            InstructionAccount::writable(accounts[8].address()),           // [8] pool_quote_vault
+            InstructionAccount::readonly(accounts[9].address()),           // [9] protocol_fee_recipient
+            InstructionAccount::writable(accounts[10].address()),          // [10] protocol_fee_recipient_ata
+            InstructionAccount::readonly(accounts[11].address()),          // [11] base_token_program
+            InstructionAccount::readonly(accounts[12].address()),          // [12] quote_token_program
+            InstructionAccount::readonly(accounts[13].address()),          // [13] system
+            InstructionAccount::readonly(accounts[14].address()),          // [14] ata_program
+            InstructionAccount::readonly(accounts[15].address()),          // [15] event_authority
+            InstructionAccount::readonly(accounts[16].address()),          // [16] program
+            InstructionAccount::writable(accounts[17].address()),          // [17] coin_creator_vault_ata
+            InstructionAccount::readonly(accounts[18].address()),          // [18] coin_creator_vault_authority
+            // remaining accounts:
+            InstructionAccount::readonly(accounts[21].address()),          // fee_config
+            InstructionAccount::readonly(accounts[22].address()),          // fee_program
+        ];
+
+        let views: [&AccountView; 21] = [
+            &accounts[0], &accounts[1], &accounts[2], &accounts[3], &accounts[4],
+            &accounts[5], &accounts[6], &accounts[7], &accounts[8], &accounts[9],
+            &accounts[10], &accounts[11], &accounts[12], &accounts[13], &accounts[14],
+            &accounts[15], &accounts[16], &accounts[17], &accounts[18],
+            &accounts[21], &accounts[22],
+        ];
+
+        let pumpswap_program = dex_pinocchio_cpi::pump_fun_amm::ID;
+        let instruction = InstructionView {
+            program_id: &pumpswap_program,
+            accounts: &instruction_accounts,
+            data: &data,
         };
-        let args = dex_pinocchio_cpi::pump_fun_amm::SellArgs {
-            base_amount_in: amount_in,
-            min_quote_amount_out: 1,
-        };
-        dex_pinocchio_cpi::pump_fun_amm::sell(&sell_accounts, &args, &[])
+
+        invoke_signed_with_slice(&instruction, &views, &[])
     }
 }
 
