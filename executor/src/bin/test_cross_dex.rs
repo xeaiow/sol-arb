@@ -30,14 +30,37 @@ struct PoolInfo {
 async fn decode_pool(rpc: &RpcClient, addr: &str, dex: DexType, name: &'static str) -> anyhow::Result<PoolInfo> {
     let address: Pubkey = addr.parse()?;
     let data = rpc.get_account_data(&address).await?;
-    let state = match dex {
+    let mut state = match dex {
         DexType::PumpSwap => decoder::pumpswap::decode_bytes(&address, &data),
         DexType::RaydiumCpmm => decoder::raydium_cpmm::decode_bytes(&address, &data),
         DexType::MeteoraDammV2 => decoder::meteora_damm_v2::decode_bytes(&address, &data),
         DexType::RaydiumAmmV4 => decoder::raydium_amm_v4::decode_bytes(&address, &data),
         DexType::MeteoraDlmm => decoder::meteora_dlmm::decode_bytes(&address, &data),
+        DexType::OrcaWhirlpool => decoder::orca_whirlpool::decode_bytes(&address, &data),
         _ => None,
     }.ok_or_else(|| anyhow::anyhow!("decode {} failed", name))?;
+
+    // For Whirlpool: fetch tick array PDAs and add to extra_accounts
+    // Order: current, current-1, current-2, current+1, current+2, etc.
+    // tx_builder picks [1..] and reorders by direction, so store them all
+    if dex == DexType::OrcaWhirlpool {
+        if let PoolMath::Concentrated { tick_current, tick_spacing, .. } = &state.math {
+            let starts = decoder::orca_whirlpool::tick_array_start_indices(*tick_current, *tick_spacing);
+            // starts = [cur-3, cur-2, cur-1, cur, cur+1, cur+2, cur+3]
+            // Store in order: current first, then both directions
+            let order = [3, 2, 4, 1, 5, 0, 6]; // cur, cur-1, cur+1, cur-2, cur+2, cur-3, cur+3
+            let mut loaded = 0;
+            for &idx in &order {
+                if let Some(pda) = decoder::orca_whirlpool::tick_array_pda(&address, starts[idx]) {
+                    if rpc.get_account(&pda).await.is_ok() {
+                        state.extra_accounts.push(pda);
+                        loaded += 1;
+                    }
+                }
+            }
+            println!("  {} tick arrays loaded for {}", loaded, name);
+        }
+    }
 
     // Check token-2022
     let token_mint = if state.mint_a.to_string().starts_with("So1111") { state.mint_b } else { state.mint_a };
@@ -49,20 +72,45 @@ async fn decode_pool(rpc: &RpcClient, addr: &str, dex: DexType, name: &'static s
     Ok(PoolInfo { address, state, dex_name: name, mint_is_2022 })
 }
 
-fn build_accounts(pool: &PoolInfo) -> Vec<Pubkey> {
+fn build_accounts(pool: &PoolInfo, is_a_to_b: bool) -> Vec<Pubkey> {
     let mut accounts = vec![pool.address];
     if let Some(va) = pool.state.vault_a { accounts.push(va); }
     if let Some(vb) = pool.state.vault_b { accounts.push(vb); }
-    accounts.extend_from_slice(&pool.state.extra_accounts);
 
-    // DLMM: fetch bin arrays inline
-    if pool.state.dex_type == DexType::MeteoraDlmm {
-        if let PoolMath::MeteoraDlmm { active_id, .. } = &pool.state.math {
-            let pdas = decoder::meteora_dlmm::bin_array_pdas_for_swap(&pool.address, *active_id);
-            // extra_accounts already has [oracle, bin_pda1, bin_pda2, bin_pda3]
-            // accounts = [pool, vault_a, vault_b, oracle, bin1, bin2, bin3]
+    // For Whirlpool: extra_accounts = [oracle, ta_pda1, ta_pda2, ...]
+    // We need to pick the right 3 tick arrays based on direction.
+    // The decode_pool stores all 7 tick array PDAs after the oracle.
+    if pool.state.dex_type == DexType::OrcaWhirlpool {
+        if let PoolMath::Concentrated { tick_current, tick_spacing, .. } = &pool.state.math {
+            // Push oracle first
+            if let Some(oracle) = pool.state.extra_accounts.first() {
+                accounts.push(*oracle);
+            }
+
+            let ts = *tick_spacing as i32;
+            let ticks_in_array = ts * 88;
+
+            // For b_to_a: shift by tick_spacing
+            let ref_tick = if !is_a_to_b { *tick_current + ts } else { *tick_current };
+            let current_start = decoder::orca_whirlpool::tick_array_start_index(ref_tick, *tick_spacing);
+
+            // Compute 3 tick array PDAs in direction order
+            let offsets: [i32; 3] = if is_a_to_b {
+                [0, -1, -2] // descending
+            } else {
+                [0, 1, 2]   // ascending
+            };
+            for offset in &offsets {
+                let start = current_start + offset * ticks_in_array;
+                if let Some(pda) = decoder::orca_whirlpool::tick_array_pda(&pool.address, start) {
+                    accounts.push(pda);
+                }
+            }
         }
+    } else {
+        accounts.extend_from_slice(&pool.state.extra_accounts);
     }
+
     accounts
 }
 
@@ -89,8 +137,8 @@ async fn test_cross(
     let buy_a_to_b = buy_sol_is_a;   // SOL→token
     let sell_a_to_b = !sell_sol_is_a; // token→SOL
 
-    let buy_accounts = build_accounts(buy_pool);
-    let sell_accounts = build_accounts(sell_pool);
+    let buy_accounts = build_accounts(buy_pool, buy_a_to_b);
+    let sell_accounts = build_accounts(sell_pool, sell_a_to_b);
 
     let (buy_mint_a_2022, buy_mint_b_2022) = if buy_sol_is_a {
         (false, buy_pool.mint_is_2022)
@@ -181,34 +229,29 @@ async fn main() -> anyhow::Result<()> {
 
     println!("Payer: {}", payer.pubkey());
 
-    // Use FDQ77aHD token — has both PumpSwap and DLMM pools (confirmed working)
-    let pumpswap = decode_pool(&rpc, "ED41PwcJhsPgbUHQb4LZJbWzFXtcEC6RAherWC2YgEU3",
-        DexType::PumpSwap, "PumpSwap").await?;
-    let dlmm = decode_pool(&rpc, "6Jq5BtZ6ExjBgY4PU7jnVWgV9jzbQuWGQZVrvNvDbABP",
-        DexType::MeteoraDlmm, "DLMM").await?;
-
-    // Test 1: DLMM buy → PumpSwap sell (already confirmed working)
-    test_cross(&rpc, &payer, &config, &dlmm, &pumpswap).await?;
-
-    // Test 2: PumpSwap buy → DLMM sell (reverse direction)
-    test_cross(&rpc, &payer, &config, &pumpswap, &dlmm).await?;
-
-    // SOL/USDC pools on 3 DEXes — real cross-DEX tests
-    let ammv4 = decode_pool(&rpc, "58oQChx4yWmvKdwLLZzBi4ChoCc2fqCUWBkwMihLYQo2",
-        DexType::RaydiumAmmV4, "AMM V4").await?;
+    // SOL/USDC pools for cross-DEX tests
     let cpmm_usdc = decode_pool(&rpc, "47hq28mcL7q5GhBg7epyGF2dnuJd4MKFt8QhT7CzYUp4",
         DexType::RaydiumCpmm, "CPMM").await?;
     let dammv2_usdc = decode_pool(&rpc, "B5NKvGBqUUXUxqiAK5yjBzkBgtHX9LzcNU9A8aSxowK",
         DexType::MeteoraDammV2, "DammV2").await?;
 
-    // Test 3: AMM V4 buy → CPMM sell (SOL/USDC)
-    test_cross(&rpc, &payer, &config, &ammv4, &cpmm_usdc).await?;
+    // Whirlpool SOL/USDC pool
+    let whirlpool = decode_pool(&rpc, "HJPjoWUrhoZzkNfRpHuieeFk9WcZWjwy6PBjZ81ngndJ",
+        DexType::OrcaWhirlpool, "Whirlpool").await?;
 
-    // Test 4: CPMM buy → DammV2 sell (SOL/USDC)
-    test_cross(&rpc, &payer, &config, &cpmm_usdc, &dammv2_usdc).await?;
+    // DLMM SOL/USDC pool
+    let dlmm_usdc = decode_pool(&rpc, "R5trYLjPStfMRLbS9enkxBcWUCC9NSCEob3RXGWeBdH",
+        DexType::MeteoraDlmm, "DLMM-USDC").await;
 
-    // Test 5: DammV2 buy → AMM V4 sell (SOL/USDC)
-    test_cross(&rpc, &payer, &config, &dammv2_usdc, &ammv4).await?;
+    // Test 1: Whirlpool buy → DammV2 sell (SOL/USDC)
+    println!("\n--- Whirlpool cross-DEX tests ---");
+    test_cross(&rpc, &payer, &config, &whirlpool, &dammv2_usdc).await?;
+
+    // Test 2: Whirlpool buy → CPMM sell (SOL/USDC)
+    test_cross(&rpc, &payer, &config, &whirlpool, &cpmm_usdc).await?;
+
+    // Test 3: CPMM buy → Whirlpool sell (SOL/USDC) — tests Whirlpool sell (b_to_a)
+    test_cross(&rpc, &payer, &config, &cpmm_usdc, &whirlpool).await?;
 
     Ok(())
 }

@@ -436,7 +436,7 @@ impl Scanner {
     /// These are the accounts that swap.rs receives as `pool_accounts`.
     /// User-specific accounts (payer, user ATAs) and fixed program IDs are
     /// filled in by TxBuilder — this only returns pool-specific accounts.
-    fn build_pool_accounts(pool: &PoolEntry, _is_a_to_b: bool) -> Vec<Pubkey> {
+    fn build_pool_accounts(pool: &PoolEntry, is_a_to_b: bool) -> Vec<Pubkey> {
         // Layout: [pool_address, vault_a, vault_b, extra_accounts...]
         // TxBuilder expects extra_accounts ordering per DEX:
         //   RaydiumCpmm: [amm_config, observation_key]
@@ -453,38 +453,45 @@ impl Scanner {
         }
         accounts.extend_from_slice(&pool.extra_accounts);
 
-        // CLMM/Whirlpool: pass tick array PDAs. The FIRST tick array must contain
-        // tick_current. If no loaded tick array covers current tick,
-        // return empty to signal pool isn't ready (needs tick array reload).
+        // CLMM/Whirlpool: pass tick array PDAs ordered by swap direction.
+        // Whirlpool requires: tick_array_0 contains current tick, then next arrays
+        // in the direction of price movement.
+        //   a_to_b (price ↓): current, current-1, current-2 (descending start_index)
+        //   b_to_a (price ↑): current(+shift), current+1, current+2 (ascending start_index)
         if pool.dex_type == DexType::RaydiumClmm || pool.dex_type == DexType::OrcaWhirlpool {
             if let PoolMath::Concentrated { tick_current, tick_spacing, tick_arrays, .. } = &pool.math {
                 if tick_arrays.is_empty() {
                     return vec![];
                 }
-                // Raydium CLMM: 60 ticks per array; Orca Whirlpool: 88 ticks per array
-                let ticks_per_array_count = if pool.dex_type == DexType::OrcaWhirlpool { 88 } else { 60 };
+                let is_whirlpool = pool.dex_type == DexType::OrcaWhirlpool;
+                let ticks_per_array_count: i32 = if is_whirlpool { 88 } else { 60 };
                 let ts = *tick_spacing as i32;
                 let ticks_per_array = ts * ticks_per_array_count;
 
-                let current_start = if pool.dex_type == DexType::OrcaWhirlpool {
-                    orca_whirlpool::tick_array_start_index(*tick_current, *tick_spacing)
+                // For Whirlpool b_to_a: shift by tick_spacing to find the correct starting array
+                let ref_tick = if is_whirlpool && !is_a_to_b {
+                    *tick_current + ts
                 } else {
-                    raydium_clmm::tick_array_start_index(*tick_current, *tick_spacing)
+                    *tick_current
                 };
 
-                // Find the tick array that contains tick_current (must be first)
+                let current_start = if is_whirlpool {
+                    orca_whirlpool::tick_array_start_index(ref_tick, *tick_spacing)
+                } else {
+                    raydium_clmm::tick_array_start_index(ref_tick, *tick_spacing)
+                };
+
+                // Find the tick array that contains ref_tick (must be first)
                 let containing = tick_arrays.iter().find(|ta| {
-                    *tick_current >= ta.start_tick_index
-                        && *tick_current < ta.start_tick_index + ticks_per_array
+                    ref_tick >= ta.start_tick_index
+                        && ref_tick < ta.start_tick_index + ticks_per_array
                 });
 
                 let Some(first_ta) = containing else {
-                    // No tick array covers current tick — pool not ready
                     return vec![];
                 };
 
-                // Derive PDA for the containing tick array
-                let first_pda = if pool.dex_type == DexType::OrcaWhirlpool {
+                let first_pda = if is_whirlpool {
                     orca_whirlpool::tick_array_pda(&pool.address, first_ta.start_tick_index)
                 } else {
                     raydium_clmm::tick_array_pda(&pool.address, first_ta.start_tick_index)
@@ -493,14 +500,25 @@ impl Scanner {
                     accounts.push(pda);
                 }
 
-                // Then: remaining tick arrays sorted by distance from current
+                // Remaining tick arrays: sorted by direction (not distance)
+                // a_to_b: descending start_index (next lower arrays)
+                // b_to_a: ascending start_index (next higher arrays)
                 let mut others: Vec<_> = tick_arrays.iter()
                     .filter(|ta| ta.start_tick_index != first_ta.start_tick_index)
                     .collect();
-                others.sort_by_key(|ta| (ta.start_tick_index - current_start).unsigned_abs());
+
+                if is_a_to_b {
+                    // Price goes down: need arrays with lower start_index
+                    others.retain(|ta| ta.start_tick_index < first_ta.start_tick_index);
+                    others.sort_by(|a, b| b.start_tick_index.cmp(&a.start_tick_index)); // descending
+                } else {
+                    // Price goes up: need arrays with higher start_index
+                    others.retain(|ta| ta.start_tick_index > first_ta.start_tick_index);
+                    others.sort_by(|a, b| a.start_tick_index.cmp(&b.start_tick_index)); // ascending
+                }
 
                 for ta in others.iter().take(2) {
-                    let pda = if pool.dex_type == DexType::OrcaWhirlpool {
+                    let pda = if is_whirlpool {
                         orca_whirlpool::tick_array_pda(&pool.address, ta.start_tick_index)
                     } else {
                         raydium_clmm::tick_array_pda(&pool.address, ta.start_tick_index)
