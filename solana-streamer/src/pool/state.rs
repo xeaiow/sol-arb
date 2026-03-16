@@ -539,19 +539,21 @@ fn dlmm_get_amount_out(
         return 0;
     }
 
-    // Compute base fee rate: base_factor * bin_step * 10 / 1e9
-    let base_fee = base_factor as f64 * bin_step as f64 * 10.0 / 1_000_000_000.0;
+    // Fee computation: all intermediate values in 1e-9 integer units (FEE_PRECISION).
+    // base_fee_int = base_factor * bin_step * 10  (1e-9 units)
+    // v_fee_int = ceil(variable_fee_control * (vol_acc * bin_step)^2 / 1e11) (1e-9 units)
+    // total = min(base + v_fee, 1e8) / 1e9  (fraction, max 10%)
+    const FEE_PRECISION: f64 = 1_000_000_000.0;
+    const MAX_FEE_RATE_INT: f64 = 100_000_000.0; // 10% in 1e-9 units
 
-    // Compute variable fee rate
-    let var_fee = if variable_fee_control > 0 {
+    let base_fee_int = base_factor as f64 * bin_step as f64 * 10.0;
+    let v_fee_int = if variable_fee_control > 0 {
         let va_bin = volatility_accumulator as f64 * bin_step as f64;
-        let v = variable_fee_control as f64 * va_bin * va_bin / 100_000_000_000.0;
-        v.min(0.1) // cap at 10%
+        (variable_fee_control as f64 * va_bin * va_bin / 100_000_000_000.0).ceil()
     } else {
         0.0
     };
-
-    let _total_fee_rate = (base_fee + var_fee).min(0.1); // cap total at 10%
+    let _total_fee_rate = (base_fee_int + v_fee_int).min(MAX_FEE_RATE_INT) / FEE_PRECISION;
 
     // Collect all bins from bin_arrays, sorted by bin_id
     let mut all_bins: Vec<&DlmmBin> = bin_arrays
@@ -561,8 +563,8 @@ fn dlmm_get_amount_out(
     all_bins.sort_by_key(|b| b.bin_id);
 
     log::trace!(
-        "[DLMM_QUOTE] active_id={} bin_step={} a_to_b={} amount_in={} arrays={} total_bins={} base_fee={:.6} var_fee={:.6}",
-        active_id, bin_step, is_a_to_b, amount_in, bin_arrays.len(), all_bins.len(), base_fee, var_fee,
+        "[DLMM_QUOTE] active_id={} bin_step={} a_to_b={} amount_in={} arrays={} total_bins={} base_fee_int={} v_fee_int={}",
+        active_id, bin_step, is_a_to_b, amount_in, bin_arrays.len(), all_bins.len(), base_fee_int, v_fee_int,
     );
 
     // is_a_to_b means X→Y (swap_for_y = true): traverse bins downward from active_id
@@ -596,7 +598,7 @@ fn dlmm_get_amount_out(
 
             // Dynamic fee for this bin
             let fee_rate = dlmm_dynamic_fee_rate(
-                bin.bin_id, base_fee, variable_fee_control,
+                bin.bin_id, base_fee_int, variable_fee_control,
                 max_volatility_accumulator, volatility_reference,
                 index_reference, bin_step,
             );
@@ -637,7 +639,7 @@ fn dlmm_get_amount_out(
             }
 
             let fee_rate = dlmm_dynamic_fee_rate(
-                bin.bin_id, base_fee, variable_fee_control,
+                bin.bin_id, base_fee_int, variable_fee_control,
                 max_volatility_accumulator, volatility_reference,
                 index_reference, bin_step,
             );
@@ -674,19 +676,23 @@ fn dlmm_get_amount_out(
 }
 
 /// Compute dynamic fee rate for a specific bin_id.
-/// Returns fee as a fraction (e.g. 0.001 = 0.1%).
+/// Returns fee as a fraction (e.g. 0.0005 = 0.05%).
+/// Uses 1e-9 integer arithmetic matching Meteora's on-chain FEE_PRECISION.
 #[inline]
 fn dlmm_dynamic_fee_rate(
     bin_id: i32,
-    base_fee: f64,
+    base_fee_int: f64,
     variable_fee_control: u32,
     max_volatility_accumulator: u32,
     volatility_reference: u32,
     index_reference: i32,
     bin_step: u16,
 ) -> f64 {
+    const FEE_PRECISION: f64 = 1_000_000_000.0;
+    const MAX_FEE_RATE_INT: f64 = 100_000_000.0;
+
     if variable_fee_control == 0 {
-        return base_fee;
+        return base_fee_int.min(MAX_FEE_RATE_INT) / FEE_PRECISION;
     }
 
     let delta_id = (index_reference as i64 - bin_id as i64).unsigned_abs();
@@ -694,9 +700,9 @@ fn dlmm_dynamic_fee_rate(
         .min(max_volatility_accumulator as u64);
 
     let va_bin = va as f64 * bin_step as f64;
-    let v_fee = variable_fee_control as f64 * va_bin * va_bin / 100_000_000_000.0;
+    let v_fee_int = (variable_fee_control as f64 * va_bin * va_bin / 100_000_000_000.0).ceil();
 
-    (base_fee + v_fee).min(0.1)
+    (base_fee_int + v_fee_int).min(MAX_FEE_RATE_INT) / FEE_PRECISION
 }
 
 /// Convert a tick index to sqrt_price (f64).
