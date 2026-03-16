@@ -107,6 +107,47 @@ async fn main() -> anyhow::Result<()> {
 
     println!("DLMM: {} accounts, {} bin arrays", dlmm_accounts.len(), existing_pdas.len());
 
+    // === Initialize user_volume_accumulator if needed ===
+    {
+        let (user_vol_acc, _) = Pubkey::find_program_address(
+            &[b"user_volume_accumulator", payer.pubkey().as_ref()],
+            &"pAMMBay6oceH9fJKBRHGP5D4bD4sWpmSwMn52FMfXEA".parse::<Pubkey>()?,
+        );
+        let exists = rpc.get_account(&user_vol_acc).await.is_ok();
+        if !exists {
+            println!("Initializing user_volume_accumulator...");
+            let pumpswap_prog: Pubkey = "pAMMBay6oceH9fJKBRHGP5D4bD4sWpmSwMn52FMfXEA".parse()?;
+            let (event_auth, _) = Pubkey::find_program_address(
+                &[b"__event_authority"], &pumpswap_prog,
+            );
+            // discriminator for init_user_volume_accumulator
+            let disc: [u8; 8] = [94, 6, 202, 115, 255, 96, 232, 183];
+            let ix = solana_sdk::instruction::Instruction {
+                program_id: pumpswap_prog,
+                accounts: vec![
+                    solana_sdk::instruction::AccountMeta::new(payer.pubkey(), true),      // payer
+                    solana_sdk::instruction::AccountMeta::new_readonly(payer.pubkey(), false), // user
+                    solana_sdk::instruction::AccountMeta::new(user_vol_acc, false),        // PDA
+                    solana_sdk::instruction::AccountMeta::new_readonly(
+                        "11111111111111111111111111111111".parse::<Pubkey>()?, false),     // system
+                    solana_sdk::instruction::AccountMeta::new_readonly(event_auth, false), // event_authority
+                    solana_sdk::instruction::AccountMeta::new_readonly(pumpswap_prog, false), // program
+                ],
+                data: disc.to_vec(),
+            };
+            let bh = rpc.get_latest_blockhash().await?;
+            let tx = solana_sdk::transaction::Transaction::new_signed_with_payer(
+                &[ix], Some(&payer.pubkey()), &[&payer], bh,
+            );
+            match rpc.send_and_confirm_transaction(&tx).await {
+                Ok(sig) => println!("  ✅ Initialized: {}", sig),
+                Err(e) => println!("  ❌ Init failed: {}", e),
+            }
+        } else {
+            println!("user_volume_accumulator already exists");
+        }
+    }
+
     // === Build quote ===
     // PumpSwap buy: SOL → token (is_a_to_b = false, since mint_b = SOL)
     let ps_math = PoolMath::ConstantProduct {

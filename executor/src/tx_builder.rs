@@ -703,12 +703,12 @@ impl TxBuilder {
                 );
                 // coin_creator_vault_ata = ATA(coin_creator_vault_authority, quote_mint)
                 let coin_creator_vault_ata = derive_ata_with_program(&coin_creator_vault_authority, &quote_mint, &quote_token_prog);
-                // global_volume_accumulator PDA
+                // Volume accumulator PDAs — must use correct PDA even if not initialized.
+                // PumpSwap validates seeds via ConstraintSeeds.
                 let (global_volume_acc, _) = Pubkey::find_program_address(
                     &[b"global_volume_accumulator"],
                     &PUMPSWAP_PROGRAM,
                 );
-                // user_volume_accumulator PDA
                 let (user_volume_acc, _) = Pubkey::find_program_address(
                     &[b"user_volume_accumulator", self.payer_pubkey.as_ref()],
                     &PUMPSWAP_PROGRAM,

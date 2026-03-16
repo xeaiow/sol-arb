@@ -252,7 +252,7 @@ fn swap_pumpfun(accounts: &[AccountView], is_a_to_b: bool, amount_in: u64) -> Pr
         let args = dex_pinocchio_cpi::pump_fun::BuyArgs {
             amount: amount_in,
             max_sol_cost: u64::MAX,
-            track_volume: [0u8; 32],
+            track_volume: 0,
         };
         dex_pinocchio_cpi::pump_fun::buy(&buy_accounts, &args, &[])
     } else {
@@ -317,7 +317,7 @@ fn swap_pumpswap(accounts: &[AccountView], is_a_to_b: bool, amount_in: u64) -> P
         let args = dex_pinocchio_cpi::pump_fun_amm::BuyExactQuoteInArgs {
             spendable_quote_in: amount_in,
             min_base_amount_out: 1,
-            track_volume: [0u8; 32],
+            track_volume: 0,  // OptionBool: false (don't track volume)
         };
         dex_pinocchio_cpi::pump_fun_amm::buy_exact_quote_in(&buy_accounts, &args, &[])
     } else {
