@@ -539,140 +539,183 @@ fn dlmm_get_amount_out(
         return 0;
     }
 
-    // Fee computation: all intermediate values in 1e-9 integer units (FEE_PRECISION).
-    // base_fee_int = base_factor * bin_step * 10  (1e-9 units)
-    // v_fee_int = ceil(variable_fee_control * (vol_acc * bin_step)^2 / 1e11) (1e-9 units)
-    // total = min(base + v_fee, 1e8) / 1e9  (fraction, max 10%)
-    const FEE_PRECISION: f64 = 1_000_000_000.0;
-    const MAX_FEE_RATE_INT: f64 = 100_000_000.0; // 10% in 1e-9 units
+    const FEE_PRECISION: u128 = 1_000_000_000;
+    const MAX_FEE_RATE: u128 = 100_000_000; // 10%
 
-    let base_fee_int = base_factor as f64 * bin_step as f64 * 10.0;
-    let v_fee_int = if variable_fee_control > 0 {
-        let va_bin = volatility_accumulator as f64 * bin_step as f64;
-        (variable_fee_control as f64 * va_bin * va_bin / 100_000_000_000.0).ceil()
-    } else {
-        0.0
-    };
-    let _total_fee_rate = (base_fee_int + v_fee_int).min(MAX_FEE_RATE_INT) / FEE_PRECISION;
-
-    // Collect all bins from bin_arrays, sorted by bin_id
+    // Collect bins sorted by bin_id
     let mut all_bins: Vec<&DlmmBin> = bin_arrays
         .iter()
         .flat_map(|ba| ba.bins.iter())
         .collect();
     all_bins.sort_by_key(|b| b.bin_id);
 
-    log::trace!(
-        "[DLMM_QUOTE] active_id={} bin_step={} a_to_b={} amount_in={} arrays={} total_bins={} base_fee_int={} v_fee_int={}",
-        active_id, bin_step, is_a_to_b, amount_in, bin_arrays.len(), all_bins.len(), base_fee_int, v_fee_int,
-    );
-
-    // is_a_to_b means X→Y (swap_for_y = true): traverse bins downward from active_id
-    // !is_a_to_b means Y→X (swap_for_y = false): traverse bins upward from active_id
     let swap_for_y = is_a_to_b;
+    let mut remaining = amount_in as u128;
+    let mut total_out: u128 = 0;
 
-    let mut remaining = amount_in as f64;
-    let mut total_out: f64 = 0.0;
-    let mut bins_consumed = 0u32;
-
-    let step_bps = bin_step as f64 / 10000.0;
-
-    if swap_for_y {
-        // X→Y: price decreases, traverse from active_id downward
-        // Bins with Y liquidity can accept X input
-        let relevant: Vec<&&DlmmBin> = all_bins
-            .iter()
+    let relevant: Vec<&&DlmmBin> = if swap_for_y {
+        all_bins.iter()
             .filter(|b| b.bin_id <= active_id && b.amount_y > 0)
-            .rev() // highest bin_id first (start from active)
-            .collect();
-
-        for bin in relevant {
-            if remaining <= 0.0 {
-                break;
-            }
-
-            let price = (1.0 + step_bps).powi(bin.bin_id);
-            if price <= 0.0 {
-                continue;
-            }
-
-            // Dynamic fee for this bin
-            let fee_rate = dlmm_dynamic_fee_rate(
-                bin.bin_id, base_fee_int, variable_fee_control,
-                max_volatility_accumulator, volatility_reference,
-                index_reference, bin_step,
-            );
-
-            // Max X that can consume all Y in this bin: max_x = amount_y / price
-            let max_x_net = bin.amount_y as f64 / price;
-            let max_x_gross = max_x_net / (1.0 - fee_rate);
-
-            let consumed = remaining.min(max_x_gross);
-            let consumed_after_fee = consumed * (1.0 - fee_rate);
-
-            let out = if consumed >= max_x_gross {
-                bin.amount_y as f64
-            } else {
-                consumed_after_fee * price
-            };
-
-            total_out += out;
-            remaining -= consumed;
-            bins_consumed += 1;
-        }
+            .rev().collect()
     } else {
-        // Y→X: price increases, traverse from active_id upward
-        // Bins with X liquidity can accept Y input
-        let relevant: Vec<&&DlmmBin> = all_bins
-            .iter()
+        all_bins.iter()
             .filter(|b| b.bin_id >= active_id && b.amount_x > 0)
-            .collect(); // lowest bin_id first (start from active)
+            .collect()
+    };
 
-        for bin in relevant {
-            if remaining <= 0.0 {
-                break;
-            }
+    for bin in relevant {
+        if remaining == 0 { break; }
 
-            let price = (1.0 + step_bps).powi(bin.bin_id);
-            if price <= 0.0 {
-                continue;
-            }
+        // Q64.64 price using binary exponentiation (matches on-chain pow())
+        let price = dlmm_price_q64(bin.bin_id, bin_step);
+        if price == 0 { continue; }
 
-            let fee_rate = dlmm_dynamic_fee_rate(
-                bin.bin_id, base_fee_int, variable_fee_control,
-                max_volatility_accumulator, volatility_reference,
-                index_reference, bin_step,
-            );
+        // Fee rate in 1e-9 units
+        let fee_rate = dlmm_dynamic_fee_rate_int(
+            bin.bin_id, base_factor, bin_step, variable_fee_control,
+            max_volatility_accumulator, volatility_reference, index_reference,
+        );
 
-            // Max Y that can consume all X in this bin: max_y = amount_x * price
-            let max_y_net = bin.amount_x as f64 * price;
-            let max_y_gross = max_y_net / (1.0 - fee_rate);
+        if swap_for_y {
+            // X→Y: max_in_net = ceil(amount_y << 64 / price)
+            let amount_y = bin.amount_y as u128;
+            let max_in_net = (amount_y << 64).checked_add(price - 1).unwrap_or(u128::MAX) / price;
 
-            let consumed = remaining.min(max_y_gross);
-            let consumed_after_fee = consumed * (1.0 - fee_rate);
+            // max_fee = ceil(max_in_net * fee_rate / (FEE_PRECISION - fee_rate))
+            let denom = FEE_PRECISION.saturating_sub(fee_rate);
+            let max_fee = if denom > 0 {
+                (max_in_net * fee_rate + denom - 1) / denom
+            } else { 0 };
+            let max_in_gross = max_in_net + max_fee;
 
-            let out = if consumed >= max_y_gross {
-                bin.amount_x as f64
+            if remaining >= max_in_gross {
+                // Full bin consumed
+                total_out += amount_y;
+                remaining -= max_in_gross;
             } else {
-                consumed_after_fee / price
-            };
+                // Partial bin: fee = ceil(remaining * fee_rate / FEE_PRECISION)
+                let fee = (remaining * fee_rate + FEE_PRECISION - 1) / FEE_PRECISION;
+                let after_fee = remaining.saturating_sub(fee);
+                // out = floor(price * after_fee >> 64)
+                let out = (price as u128).checked_mul(after_fee).unwrap_or(0) >> 64;
+                total_out += out.min(amount_y);
+                remaining = 0;
+            }
+        } else {
+            // Y→X: max_in_net = ceil(amount_x * price >> 64)
+            //   = ceil( (amount_x * price) / 2^64 )
+            let amount_x = bin.amount_x as u128;
+            let product = amount_x.checked_mul(price).unwrap_or(u128::MAX);
+            let max_in_net = (product + (1u128 << 64) - 1) >> 64;
 
-            total_out += out;
-            remaining -= consumed;
-            bins_consumed += 1;
+            let denom = FEE_PRECISION.saturating_sub(fee_rate);
+            let max_fee = if denom > 0 {
+                (max_in_net * fee_rate + denom - 1) / denom
+            } else { 0 };
+            let max_in_gross = max_in_net + max_fee;
+
+            if remaining >= max_in_gross {
+                total_out += amount_x;
+                remaining -= max_in_gross;
+            } else {
+                let fee = (remaining * fee_rate + FEE_PRECISION - 1) / FEE_PRECISION;
+                let after_fee = remaining.saturating_sub(fee);
+                // out = floor(after_fee << 64 / price)
+                let out = (after_fee << 64) / price;
+                total_out += out.min(amount_x);
+                remaining = 0;
+            }
         }
     }
 
-    // Apply 0.5% haircut for f64 precision loss (similar to CLMM's 0.3%)
-    let out = total_out * 0.995;
-    let result = out.max(0.0) as u64;
+    total_out.min(u64::MAX as u128) as u64
+}
 
-    log::trace!(
-        "[DLMM_QUOTE] result: in={} out={} bins_consumed={} remaining={:.0} haircut_out={}",
-        amount_in, result, bins_consumed, remaining, result,
-    );
+/// Compute Q64.64 price: (1 + bin_step/10000) ^ bin_id
+/// Uses binary exponentiation with truncation matching on-chain pow()
+fn dlmm_price_q64(bin_id: i32, bin_step: u16) -> u128 {
+    let one: u128 = 1u128 << 64;
+    let bps = ((bin_step as u128) << 64) / 10_000;
+    let base = one + bps;
 
-    result
+    if bin_id == 0 { return one; }
+
+    let (exp, invert) = if bin_id > 0 {
+        (bin_id as u32, false)
+    } else {
+        ((-bin_id) as u32, true)
+    };
+
+    // Binary exponentiation in Q64.64
+    let mut result: u128 = one;
+    let mut b = base;
+    let mut e = exp;
+    while e > 0 {
+        if e & 1 == 1 {
+            result = mul_shr64(result, b);
+        }
+        b = mul_shr64(b, b);
+        e >>= 1;
+    }
+
+    if invert {
+        if result == 0 { return 0; }
+        // 1/result in Q64.64 = (1 << 128) / result
+        // Use u128 division: split (1 << 128) / result into parts
+        // (1 << 128) = (u128::MAX + 1), which doesn't fit u128
+        // Instead: result_inv = u128::MAX / result (approximate, off by at most 1)
+        u128::MAX / result
+    } else {
+        result
+    }
+}
+
+/// Multiply two Q64.64 numbers: (a * b) >> 64, with truncation
+#[inline]
+fn mul_shr64(a: u128, b: u128) -> u128 {
+    // Use u128 multiplication, take upper 128 bits by shifting
+    // a * b could overflow u128, so split into parts
+    let a_hi = a >> 64;
+    let a_lo = a & ((1u128 << 64) - 1);
+    let b_hi = b >> 64;
+    let b_lo = b & ((1u128 << 64) - 1);
+
+    // a * b = (a_hi * b_hi) << 128 + (a_hi * b_lo + a_lo * b_hi) << 64 + a_lo * b_lo
+    // We want (a * b) >> 64:
+    let mid = a_hi * b_lo + a_lo * b_hi;
+    let lo = a_lo * b_lo;
+
+    a_hi * b_hi * (1u128 << 64) + mid + (lo >> 64)
+}
+
+/// Dynamic fee rate in 1e-9 integer units (matching on-chain)
+fn dlmm_dynamic_fee_rate_int(
+    bin_id: i32,
+    base_factor: u16,
+    bin_step: u16,
+    variable_fee_control: u32,
+    max_volatility_accumulator: u32,
+    volatility_reference: u32,
+    index_reference: i32,
+) -> u128 {
+    const FEE_PRECISION: u128 = 1_000_000_000;
+    const MAX_FEE_RATE: u128 = 100_000_000;
+
+    let base_fee = base_factor as u128 * bin_step as u128 * 10;
+
+    if variable_fee_control == 0 {
+        return base_fee.min(MAX_FEE_RATE);
+    }
+
+    let delta_id = ((index_reference as i64) - (bin_id as i64)).unsigned_abs();
+    let va = ((volatility_reference as u64) + delta_id * 10_000)
+        .min(max_volatility_accumulator as u64);
+
+    let va_bin = va as u128 * bin_step as u128;
+    let sq = va_bin * va_bin;
+    let v_fee = (variable_fee_control as u128 * sq + 99_999_999_999) / 100_000_000_000;
+
+    (base_fee + v_fee).min(MAX_FEE_RATE)
 }
 
 /// Compute dynamic fee rate for a specific bin_id.
