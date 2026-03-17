@@ -67,6 +67,10 @@ pub struct PoolStreamer {
     vault_update_count: AtomicU64,
     /// Counter for ALL token account events received (diagnostic)
     token_event_count: AtomicU64,
+    /// DLMM pools whose vault changed — need bin array refresh
+    dirty_dlmm_pools: Arc<tokio::sync::Mutex<std::collections::HashSet<Pubkey>>>,
+    /// Notify: dirty DLMM pools pending bin array refresh
+    dlmm_refresh_notify: Arc<Notify>,
 }
 
 impl PoolStreamer {
@@ -91,6 +95,8 @@ impl PoolStreamer {
             tick_reload_notify,
             vault_update_count: AtomicU64::new(0),
             token_event_count: AtomicU64::new(0),
+            dirty_dlmm_pools: Arc::new(tokio::sync::Mutex::new(std::collections::HashSet::new())),
+            dlmm_refresh_notify: Arc::new(Notify::new()),
         };
 
         (streamer, update_rx)
@@ -429,6 +435,19 @@ impl PoolStreamer {
                     count, token_account, balance, slot);
             }
             self.cache.update_vault_balance(token_account, balance, is_a, slot);
+
+            // If this vault belongs to a DLMM pool, mark it dirty for bin array refresh
+            if let Some(pool_addr) = self.cache.pool_by_vault(token_account) {
+                if let Some(pool) = self.cache.get(&pool_addr) {
+                    if pool.dex_type == super::state::DexType::MeteoraDlmm {
+                        // Non-blocking: try_lock to avoid contention on hot path
+                        if let Ok(mut dirty) = self.dirty_dlmm_pools.try_lock() {
+                            dirty.insert(pool_addr);
+                        }
+                        self.dlmm_refresh_notify.notify_one();
+                    }
+                }
+            }
         }
     }
 
@@ -837,6 +856,73 @@ impl PoolStreamer {
     pub async fn drain_pending_subscriptions(&self) -> Vec<String> {
         let mut pending = self.pending_subscriptions.lock().await;
         std::mem::take(&mut *pending)
+    }
+
+    /// Notify handle for DLMM bin array refresh (wire to background task)
+    pub fn dlmm_refresh_notify(&self) -> Arc<Notify> {
+        self.dlmm_refresh_notify.clone()
+    }
+
+    /// Flush dirty DLMM pools: batch-fetch bin arrays for pools whose vaults changed.
+    /// Called from a background task triggered by dlmm_refresh_notify.
+    pub async fn flush_dirty_dlmm_pools(&self) {
+        // Drain dirty set
+        let pools: Vec<Pubkey> = {
+            let mut dirty = self.dirty_dlmm_pools.lock().await;
+            let drained: Vec<Pubkey> = dirty.drain().collect();
+            drained
+        };
+
+        if pools.is_empty() { return; }
+
+        // Collect all bin array PDAs to fetch
+        let mut pda_requests: Vec<(Pubkey, Pubkey, i64)> = Vec::new(); // (pda, pool_addr, bin_index)
+        for pool_addr in &pools {
+            if let Some(pool) = self.cache.get(pool_addr) {
+                if let PoolMath::MeteoraDlmm { active_id, .. } = &pool.math {
+                    let pdas = decoder::meteora_dlmm::bin_array_pdas_for_swap(pool_addr, *active_id);
+                    let idx = decoder::meteora_dlmm::bin_id_to_bin_array_index(*active_id);
+                    for (i, pda) in pdas.iter().enumerate() {
+                        pda_requests.push((*pda, *pool_addr, idx as i64 - 1 + i as i64));
+                    }
+                }
+            }
+        }
+
+        if pda_requests.is_empty() { return; }
+
+        // Batch fetch (max 50 per call)
+        let mut fetched = 0usize;
+        for chunk in pda_requests.chunks(50) {
+            let pubkeys: Vec<Pubkey> = chunk.iter().map(|(pda, _, _)| *pda).collect();
+            match self.rpc.get_multiple_accounts(&pubkeys).await {
+                Ok(accounts) => {
+                    let mut pool_bins: std::collections::HashMap<Pubkey, Vec<super::state::DlmmBinArray>> =
+                        std::collections::HashMap::new();
+                    for (i, maybe) in accounts.iter().enumerate() {
+                        if let Some(account) = maybe {
+                            let (_, pool_addr, _) = chunk[i];
+                            if let Some(ba) = decoder::meteora_dlmm::decode_bin_array(&account.data) {
+                                pool_bins.entry(pool_addr).or_default().push(ba);
+                                fetched += 1;
+                            }
+                        }
+                    }
+                    // Update cache
+                    let slot = self.latest_blockhash_slot.load(Ordering::Relaxed);
+                    for (pool_addr, bin_arrays) in pool_bins {
+                        self.cache.replace_bin_arrays_simple(&pool_addr, bin_arrays, slot);
+                    }
+                }
+                Err(e) => {
+                    log::warn!("DLMM bin array batch fetch failed: {}", e);
+                }
+            }
+        }
+
+        if fetched > 0 {
+            log::debug!("[DLMM_REFRESH] {} pools, {} bin arrays fetched", pools.len(), fetched);
+        }
     }
 
     pub fn pool_count(&self) -> usize {

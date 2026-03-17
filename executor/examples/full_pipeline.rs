@@ -296,6 +296,18 @@ async fn main() -> anyhow::Result<()> {
         }
     };
 
+    // ── DLMM bin array refresh (vault change → fetch fresh bin arrays) ──
+    let dlmm_notify = pool_streamer.dlmm_refresh_notify();
+    let dlmm_streamer = pool_streamer.clone();
+    let dlmm_refresher = async move {
+        loop {
+            dlmm_notify.notified().await;
+            // Debounce: wait 100ms to batch multiple vault updates
+            tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
+            dlmm_streamer.flush_dirty_dlmm_pools().await;
+        }
+    };
+
     // ── Run all stages concurrently ─────────────────────────────────────
     tokio::select! {
         _ = arb_scanner.run() => {
@@ -312,6 +324,9 @@ async fn main() -> anyhow::Result<()> {
         }
         _ = tick_reloader => {
             eprintln!("Tick reloader exited");
+        }
+        _ = dlmm_refresher => {
+            eprintln!("DLMM refresher exited");
         }
         _ = tokio::signal::ctrl_c() => {
             eprintln!("\nShutting down...");

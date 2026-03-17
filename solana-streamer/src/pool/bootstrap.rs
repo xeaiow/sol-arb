@@ -393,35 +393,13 @@ pub async fn bootstrap_pools(streamer: &Arc<PoolStreamer>, gpa_rpc_url: &str) {
     // For tokens with pools on 2+ DEXes, subscribe all vault addresses
     // so gRPC pushes real-time vault balance updates. This enables
     // cache-only price comparison without RPC fetches.
-    let mut sub_addrs: Vec<String> = Vec::new();
-    let mut cross_dex_vaults = 0usize;
-    let mut cross_dex_arrays = 0usize;
-    for mint in &multi_dex_mints {
-        let pool_addrs = cache.pools_for_mint(mint);
-        if pool_addrs.len() < 2 { continue; }
-        for pool_addr in &pool_addrs {
-            if let Some(pool) = cache.get(pool_addr) {
-                if let Some(va) = pool.vault_a {
-                    sub_addrs.push(va.to_string());
-                    cross_dex_vaults += 1;
-                }
-                if let Some(vb) = pool.vault_b {
-                    sub_addrs.push(vb.to_string());
-                    cross_dex_vaults += 1;
-                }
-                // Skip bin/tick array subscriptions (too many, crashes gRPC).
-                // ArbScanner verifies with fresh RPC data before sending.
-            }
-        }
-    }
-    if !sub_addrs.is_empty() {
-        streamer.queue_subscriptions_batch(sub_addrs).await;
-        streamer.subscription_dirty().store(true, std::sync::atomic::Ordering::Release);
-        streamer.subscription_notify().notify_waiters();
-    }
+    // Phase 5: No explicit vault subscriptions needed.
+    // Vault balances are extracted from transaction meta (postTokenBalances)
+    // via the transaction subscription's program filter — zero extra subscriptions.
+    // Owner filter handles pool state + bin/tick array account updates.
     info!(
-        "[GPA] Phase 5: queued {} vault + {} bin array subscriptions for {} multi-DEX mints",
-        cross_dex_vaults, cross_dex_arrays, multi_dex_mints.len(),
+        "[GPA] Phase 5: skipped (vault balances from tx meta, {} multi-DEX mints)",
+        multi_dex_mints.len(),
     );
 
     info!(
