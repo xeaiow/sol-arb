@@ -34,6 +34,8 @@ pub struct ArbScanner {
     recent: HashMap<(Pubkey, Pubkey), Instant>,
     /// Probe amount for price comparison
     probe_amount: u64,
+    /// Only emit opportunities when ready (bootstrap complete)
+    ready: Arc<std::sync::atomic::AtomicBool>,
 }
 
 impl ArbScanner {
@@ -49,7 +51,13 @@ impl ArbScanner {
             opportunity_tx,
             recent: HashMap::new(),
             probe_amount,
+            ready: Arc::new(std::sync::atomic::AtomicBool::new(false)),
         }
+    }
+
+    /// Get a handle to set ready state (call after bootstrap completes)
+    pub fn ready_flag(&self) -> Arc<std::sync::atomic::AtomicBool> {
+        self.ready.clone()
     }
 
     pub async fn run(&mut self) {
@@ -91,7 +99,10 @@ impl ArbScanner {
     }
 
     fn process_update(&mut self, update: &PoolUpdate) -> (u64, u64) {
-        // Only process SOL-paired pools
+        if !self.ready.load(std::sync::atomic::Ordering::Relaxed) {
+            return (0, 0);
+        }
+
         let token_mint = if update.mint_a == WSOL {
             update.mint_b
         } else if update.mint_b == WSOL {

@@ -109,7 +109,8 @@ async fn main() -> anyhow::Result<()> {
         opp_tx,
         probe_amount,
     );
-    eprintln!("Stage 2 (ArbScanner) ready");
+    let arb_ready = arb_scanner.ready_flag();
+    eprintln!("Stage 2 (ArbScanner) ready — waiting for bootstrap");
 
     // ── Stage 3: Executor ───────────────────────────────────────────────
     // Extract gPA config before executor_config is moved
@@ -188,9 +189,14 @@ async fn main() -> anyhow::Result<()> {
     if gpa_enabled {
         let gpa_streamer = pool_streamer.clone();
         let gpa_url_clone = gpa_url.clone();
+        let ready = arb_ready.clone();
         tokio::spawn(async move {
             solana_streamer_sdk::pool::bootstrap::bootstrap_pools(&gpa_streamer, &gpa_url_clone).await;
+            ready.store(true, std::sync::atomic::Ordering::Release);
+            eprintln!("=== Bootstrap complete, ArbScanner ARMED ===");
         });
+    } else {
+        arb_ready.store(true, std::sync::atomic::Ordering::Release);
     }
 
     eprintln!("\n=== Pipeline running. Warming up... ===");
