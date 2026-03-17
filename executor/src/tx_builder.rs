@@ -103,6 +103,7 @@ pub struct TxBuilder {
     swqos_priority_fee: u64,
     jito_enabled: bool,
     swqos_enabled: bool,
+    astralane_enabled: bool,
     alt: Option<Arc<Tier0Alt>>,
     marginfi_state: Option<Arc<MarginFiState>>,
     nozomi_tip: Option<(Pubkey, u64)>,
@@ -147,6 +148,7 @@ impl TxBuilder {
             swqos_priority_fee: swqos_fee,
             jito_enabled,
             swqos_enabled: flashblock_enabled || astralane_enabled || nozomi_enabled,
+            astralane_enabled,
             alt: None,
             marginfi_state: None,
             nozomi_tip: config.nozomi.as_ref()
@@ -271,9 +273,12 @@ impl TxBuilder {
                 ixs.push(fl.repay.clone());
                 ixs.push(fl.end.clone());
             }
-            ixs.push(system_instruction::transfer(&payer.pubkey(), &ASTRALANE_TIP_ACCOUNT, astralane_tip));
-            // Nozomi tip
+            // Tips: only add for enabled senders
+            if self.astralane_enabled {
+                ixs.push(system_instruction::transfer(&payer.pubkey(), &ASTRALANE_TIP_ACCOUNT, astralane_tip));
+            }
             if let Some((ref tip_account, tip_amount)) = self.nozomi_tip {
+                log::info!("[TX_BUILD] Adding Nozomi tip: {} lamports to {}", tip_amount, &tip_account.to_string()[..12]);
                 ixs.push(system_instruction::transfer(&payer.pubkey(), tip_account, tip_amount));
             }
             Some(ixs)

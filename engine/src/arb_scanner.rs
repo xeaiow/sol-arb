@@ -24,7 +24,7 @@ use crate::opportunity::{Hop, Opportunity, PoolSnapshot, Route};
 const WSOL: Pubkey = solana_sdk::pubkey!("So11111111111111111111111111111111111111112");
 const MIN_SOL_RESERVE: u64 = 5_000_000_000; // 5 SOL
 const MAX_SPREAD_PCT: f64 = 50.0;
-const MIN_PROFIT_LAMPORTS: i64 = 200_000; // 0.0002 SOL — must exceed priority fee + tx fee
+const MIN_PROFIT_LAMPORTS: i64 = 1_000; // 0.000001 SOL — testing with small amounts
 
 pub struct ArbScanner {
     cache: Arc<PoolStateCache>,
@@ -156,7 +156,7 @@ impl ArbScanner {
                 continue;
             }
 
-            // Quick probe: is there any profit at small amount?
+            let t_compare = Instant::now();
             let sol_is_a_buy = buy_pool.mint_a == WSOL;
             let sol_is_a_sell = sell_pool.mint_a == WSOL;
 
@@ -174,10 +174,9 @@ impl ArbScanner {
                 }
             }
 
-            // Ternary search for optimal input amount (maximize profit)
-            let (best_amount, best_profit) = self.find_optimal_amount(
-                buy_pool, sell_pool, sol_is_a_buy, sol_is_a_sell,
-            );
+            // Fixed input for testing (0.01 SOL)
+            let best_amount = 10_000_000u64;
+            let best_profit = probe_profit;
 
             if best_profit < MIN_PROFIT_LAMPORTS {
                 continue;
@@ -190,13 +189,13 @@ impl ArbScanner {
                 opp.amount_in = best_amount;
                 let profit_sol = best_profit as f64 / 1e9;
                 let amount_sol = best_amount as f64 / 1e9;
+                let scan_us = t_compare.elapsed().as_micros();
                 info!(
-                    "[ARB] {} | buy@{:?}({}) sell@{:?}({}) | spread={:.2}% in={:.4} SOL profit={:.6} SOL ({:.2}%)",
+                    "[ARB] {} | buy@{:?}({}) sell@{:?}({}) | spread={:.2}% in={:.4} profit={:.6} SOL | scan={}µs",
                     &token_mint.to_string()[..8],
                     buy_pool.dex_type, &buy_pool.address.to_string()[..8],
                     sell_pool.dex_type, &sell_pool.address.to_string()[..8],
-                    spread, amount_sol, profit_sol,
-                    profit_sol / amount_sol * 100.0,
+                    spread, amount_sol, profit_sol, scan_us,
                 );
                 let _ = self.opportunity_tx.try_send(opp);
                 emitted += 1;

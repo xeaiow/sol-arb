@@ -34,7 +34,7 @@ fee_collectors_sol = [
 ]
 
 [jito]
-enabled = false
+enabled = true
 block_engine_urls = [
     "https://mainnet.block-engine.jito.wtf",
     "https://amsterdam.mainnet.block-engine.jito.wtf",
@@ -59,7 +59,7 @@ endpoints = [
 ]
 
 [astralane]
-enabled = true
+enabled = false
 api_key = "xyz_06iaBUneeAX291ZtQbMoGEMAStUaW9YXyHo2dIrkVSwSZiEspN75RJjTupMN"
 priority_fee_lamports = 100000
 endpoints = [
