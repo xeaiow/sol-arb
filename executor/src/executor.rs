@@ -109,6 +109,7 @@ impl Executor {
         info!("Executor started. Waiting for opportunities...");
 
         let mut latest_slot: u64 = 0;
+        let mut last_send_time = std::time::Instant::now() - std::time::Duration::from_secs(2);
 
         // Get initial blockhash
         let initial_blockhash = if let Some(ref sbh) = self.shared_blockhash {
@@ -192,6 +193,12 @@ impl Executor {
                 continue;
             }
 
+            // Skip zero-profit opportunities (blind probe noise)
+            if opp.expected_profit == 0 {
+                debug!("Skipping zero-profit opportunity");
+                continue;
+            }
+
             // Read latest blockhash (always fresh from background task)
             let recent_blockhash = *latest_bh.read().await;
             debug!("[BH] using blockhash: {}", recent_blockhash);
@@ -202,6 +209,9 @@ impl Executor {
             // Log transaction signatures for on-chain lookup
             if let Some(ref tx) = pair.jito_tx {
                 info!("Jito tx sig: {}", tx.signatures[0]);
+            }
+            if let Some(ref tx) = pair.astralane_tx {
+                info!("Astralane tx sig: {}", tx.signatures[0]);
             }
             if let Some(ref tx) = pair.swqos_tx {
                 info!("SwQoS tx sig: {}", tx.signatures[0]);
@@ -225,13 +235,13 @@ impl Executor {
             }
 
             // Skip if no tx was built (e.g. cross-hop conflict)
-            if pair.jito_tx.is_none() && pair.swqos_tx.is_none() {
+            if pair.jito_tx.is_none() && pair.astralane_tx.is_none() && pair.swqos_tx.is_none() {
                 continue;
             }
 
             // TX size check — Solana limit is 1232 bytes
             {
-                let check_tx = pair.swqos_tx.as_ref().or(pair.jito_tx.as_ref());
+                let check_tx = pair.jito_tx.as_ref().or(pair.astralane_tx.as_ref()).or(pair.swqos_tx.as_ref());
                 if let Some(tx) = check_tx {
                     if let Ok(bytes) = bincode::serialize(tx) {
                         if bytes.len() > 1232 {
@@ -261,6 +271,14 @@ impl Executor {
                 );
             }
 
+            // Rate limit: max 1 tx/sec to avoid Jito 429
+            let elapsed = last_send_time.elapsed();
+            if elapsed < std::time::Duration::from_secs(1) {
+                let wait = std::time::Duration::from_secs(1) - elapsed;
+                tokio::time::sleep(wait).await;
+            }
+            last_send_time = std::time::Instant::now();
+
             // Test mode: send and wait, then exit
             if self.tx_builder.test_mode {
                 let build_us = t_start.elapsed().as_micros();
@@ -273,14 +291,38 @@ impl Executor {
                 break;
             }
 
-            // Fire-and-forget: don't block the loop waiting for network responses
+            // Fire-and-forget send, then track result in background
             let sender = self.multi_sender.clone();
             let build_us = t_start.elapsed().as_micros();
+            let rpc_clone = self.rpc.clone();
+            let sig = pair.jito_tx.as_ref().or(pair.astralane_tx.as_ref()).or(pair.swqos_tx.as_ref())
+                .map(|tx| tx.signatures[0]);
+            let profit_str = format!("{:.6}", opp.expected_profit as f64 / 1e9);
+            let hops = opp.route.hops.len();
             tokio::spawn(async move {
                 let t_send = std::time::Instant::now();
                 sender.send_all(&pair).await;
                 let send_us = t_send.elapsed().as_micros();
                 info!("⏱️ build={}µs, send={}µs, total={}µs", build_us, send_us, build_us + send_us);
+
+                // Track on-chain result
+                if let Some(sig) = sig {
+                    tokio::time::sleep(std::time::Duration::from_secs(5)).await;
+                    match rpc_clone.get_signature_status(&sig).await {
+                        Ok(Some(Ok(()))) => info!("[RESULT] ✅ SUCCESS sig={} profit={} SOL hops={}", sig, profit_str, hops),
+                        Ok(Some(Err(e))) => warn!("[RESULT] ❌ FAILED sig={} err={:?} profit={} SOL hops={}", sig, e, profit_str, hops),
+                        Ok(None) => {
+                            // Retry once after 10 more seconds
+                            tokio::time::sleep(std::time::Duration::from_secs(10)).await;
+                            match rpc_clone.get_signature_status(&sig).await {
+                                Ok(Some(Ok(()))) => info!("[RESULT] ✅ SUCCESS sig={} profit={} SOL hops={}", sig, profit_str, hops),
+                                Ok(Some(Err(e))) => warn!("[RESULT] ❌ FAILED sig={} err={:?} profit={} SOL hops={}", sig, e, profit_str, hops),
+                                _ => debug!("[RESULT] ⚠️ NOT_FOUND sig={} (dropped or expired)", sig),
+                            }
+                        }
+                        Err(e) => debug!("[RESULT] RPC error checking sig={}: {}", sig, e),
+                    }
+                }
             });
         }
     }
