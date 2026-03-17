@@ -173,6 +173,25 @@ impl ArbScanner {
 
             let probe_tokens = buy_pool.math.get_amount_out(self.probe_amount, sol_is_a_buy);
             if probe_tokens == 0 { continue; }
+
+            // PumpSwap u64 overflow check: on-chain uses u64 for amt*reserve
+            if buy_pool.dex_type == DexType::PumpSwap || sell_pool.dex_type == DexType::PumpSwap {
+                // Check buy side: input * token_reserve must fit u64
+                if let PoolMath::ConstantProduct { reserve_a, reserve_b, .. } = &buy_pool.math {
+                    let r_out = if sol_is_a_buy { *reserve_b } else { *reserve_a };
+                    if (self.probe_amount as u128) * (r_out as u128) > u64::MAX as u128 {
+                        continue;
+                    }
+                }
+                // Check sell side: tokens * sol_reserve must fit u64
+                if let PoolMath::ConstantProduct { reserve_a, reserve_b, .. } = &sell_pool.math {
+                    let r_out = if !sol_is_a_sell { *reserve_a } else { *reserve_b };
+                    if (probe_tokens as u128) * (r_out as u128) > u64::MAX as u128 {
+                        continue;
+                    }
+                }
+            }
+
             let probe_back = sell_pool.math.get_amount_out(probe_tokens, !sol_is_a_sell);
             let probe_profit = probe_back as i64 - self.probe_amount as i64;
             if probe_profit <= 0 { continue; }

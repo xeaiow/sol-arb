@@ -144,7 +144,6 @@ impl PoolMath {
                 }
                 let ri = r_in as u128;
                 let ro = r_out as u128;
-                // All math in u128 — no overflow possible for u64 reserves
                 let numerator = amt_after_fee * ro;
                 let denominator = ri + amt_after_fee;
                 let out = numerator / denominator;
