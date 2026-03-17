@@ -103,8 +103,10 @@ async fn main() -> anyhow::Result<()> {
     // ── Stage 2: ArbScanner (cross-DEX price comparison) ────────────────
     let (opp_tx, opp_rx) = tokio::sync::mpsc::channel(4096);
     let probe_amount = engine_config.probe_amount_lamports;
+    let arb_rpc = Arc::new(solana_client::nonblocking::rpc_client::RpcClient::new(rpc_url.clone()));
     let mut arb_scanner = ArbScanner::new(
         pool_streamer.cache(),
+        arb_rpc,
         update_rx,
         opp_tx,
         probe_amount,

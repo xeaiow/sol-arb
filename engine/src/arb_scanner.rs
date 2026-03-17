@@ -11,12 +11,13 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use arrayvec::ArrayVec;
-use log::{info, debug};
+use log::info;
+use solana_client::nonblocking::rpc_client::RpcClient;
 use solana_sdk::pubkey::Pubkey;
 use tokio::sync::mpsc;
 
 use solana_streamer_sdk::pool::cache::PoolStateCache;
-use solana_streamer_sdk::pool::decoder::{orca_whirlpool, raydium_clmm};
+use solana_streamer_sdk::pool::decoder::{self, orca_whirlpool, raydium_clmm};
 use solana_streamer_sdk::pool::state::{DexType, PoolMath, PoolState, PoolUpdate};
 
 use crate::opportunity::{Hop, Opportunity, PoolSnapshot, Route};
@@ -28,25 +29,25 @@ const MIN_PROFIT_LAMPORTS: i64 = 1_000; // 0.000001 SOL — testing with small a
 
 pub struct ArbScanner {
     cache: Arc<PoolStateCache>,
+    rpc: Arc<RpcClient>,
     update_rx: mpsc::Receiver<PoolUpdate>,
     opportunity_tx: mpsc::Sender<Opportunity>,
-    /// Dedup: (buy_pool, sell_pool) → last emit time
     recent: HashMap<(Pubkey, Pubkey), Instant>,
-    /// Probe amount for price comparison
     probe_amount: u64,
-    /// Only emit opportunities when ready (bootstrap complete)
     ready: Arc<std::sync::atomic::AtomicBool>,
 }
 
 impl ArbScanner {
     pub fn new(
         cache: Arc<PoolStateCache>,
+        rpc: Arc<RpcClient>,
         update_rx: mpsc::Receiver<PoolUpdate>,
         opportunity_tx: mpsc::Sender<Opportunity>,
         probe_amount: u64,
     ) -> Self {
         Self {
             cache,
+            rpc,
             update_rx,
             opportunity_tx,
             recent: HashMap::new(),
@@ -82,7 +83,7 @@ impl ArbScanner {
                     updates += batch.len() as u64 - 1;
 
                     for upd in batch {
-                        let (c, a) = self.process_update(&upd);
+                        let (c, a) = self.process_update(&upd).await;
                         comparisons += c;
                         arb_emitted += a;
                     }
@@ -98,7 +99,7 @@ impl ArbScanner {
         }
     }
 
-    fn process_update(&mut self, update: &PoolUpdate) -> (u64, u64) {
+    async fn process_update(&mut self, update: &PoolUpdate) -> (u64, u64) {
         if !self.ready.load(std::sync::atomic::Ordering::Relaxed) {
             return (0, 0);
         }
@@ -214,18 +215,35 @@ impl ArbScanner {
 
             self.recent.insert(pair_key, Instant::now());
 
-            // Build opportunity with optimal amount
-            if let Some(mut opp) = self.build_opportunity(buy_pool, sell_pool, best_profit as u64) {
+            // RPC verify: refresh DLMM bin arrays / CP vault balances before sending
+            let verified_buy = self.refresh_pool_data(&buy_pool).await;
+            let verified_sell = self.refresh_pool_data(&sell_pool).await;
+
+            // Re-check profit with fresh data
+            let fresh_tokens = verified_buy.math.get_amount_out(best_amount, sol_is_a_buy);
+            if fresh_tokens == 0 { continue; }
+            let fresh_back = verified_sell.math.get_amount_out(fresh_tokens, !sol_is_a_sell);
+            let fresh_profit = fresh_back as i64 - best_amount as i64;
+
+            if fresh_profit < MIN_PROFIT_LAMPORTS {
+                let scan_us = t_compare.elapsed().as_micros();
+                info!(
+                    "[ARB_STALE] {} | cache_profit={:.6} fresh_profit={:.6} SOL | {}µs",
+                    &token_mint.to_string()[..8],
+                    best_profit as f64 / 1e9, fresh_profit as f64 / 1e9, scan_us,
+                );
+                continue;
+            }
+
+            if let Some(mut opp) = self.build_opportunity(&verified_buy, &verified_sell, fresh_profit as u64) {
                 opp.amount_in = best_amount;
-                let profit_sol = best_profit as f64 / 1e9;
-                let amount_sol = best_amount as f64 / 1e9;
                 let scan_us = t_compare.elapsed().as_micros();
                 info!(
                     "[ARB] {} | buy@{:?}({}) sell@{:?}({}) | spread={:.2}% in={:.4} profit={:.6} SOL | scan={}µs",
                     &token_mint.to_string()[..8],
-                    buy_pool.dex_type, &buy_pool.address.to_string()[..8],
-                    sell_pool.dex_type, &sell_pool.address.to_string()[..8],
-                    spread, amount_sol, profit_sol, scan_us,
+                    verified_buy.dex_type, &verified_buy.address.to_string()[..8],
+                    verified_sell.dex_type, &verified_sell.address.to_string()[..8],
+                    spread, best_amount as f64 / 1e9, fresh_profit as f64 / 1e9, scan_us,
                 );
                 let _ = self.opportunity_tx.try_send(opp);
                 emitted += 1;
@@ -233,6 +251,44 @@ impl ArbScanner {
         }
 
         (comparisons, emitted)
+    }
+
+    /// Fetch fresh data from RPC for a pool before sending TX.
+    /// For DLMM: re-fetch bin arrays. For CP: re-fetch vault balances.
+    async fn refresh_pool_data(&self, pool: &PoolState) -> PoolState {
+        let mut fresh = pool.clone();
+
+        match fresh.dex_type {
+            DexType::MeteoraDlmm => {
+                if let PoolMath::MeteoraDlmm { active_id, ref mut bin_arrays, .. } = fresh.math {
+                    bin_arrays.clear();
+                    for pda in decoder::meteora_dlmm::bin_array_pdas_for_swap(&fresh.address, active_id) {
+                        if let Ok(d) = self.rpc.get_account_data(&pda).await {
+                            if let Some(ba) = decoder::meteora_dlmm::decode_bin_array(&d) {
+                                bin_arrays.push(ba);
+                            }
+                        }
+                    }
+                }
+            }
+            DexType::PumpSwap | DexType::RaydiumCpmm | DexType::RaydiumAmmV4 => {
+                if let (Some(va), Some(vb)) = (fresh.vault_a, fresh.vault_b) {
+                    for (vault, is_a) in [(va, true), (vb, false)] {
+                        if let Ok(d) = self.rpc.get_account_data(&vault).await {
+                            if d.len() >= 72 {
+                                let bal = u64::from_le_bytes(d[64..72].try_into().unwrap_or([0;8]));
+                                if let PoolMath::ConstantProduct { ref mut reserve_a, ref mut reserve_b, .. } = fresh.math {
+                                    if is_a { *reserve_a = bal; } else { *reserve_b = bal; }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+            _ => {}
+        }
+
+        fresh
     }
 
     fn get_price(&self, pool: &PoolState) -> Option<f64> {

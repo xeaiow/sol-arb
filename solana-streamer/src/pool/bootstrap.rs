@@ -409,15 +409,8 @@ pub async fn bootstrap_pools(streamer: &Arc<PoolStreamer>, gpa_rpc_url: &str) {
                     sub_addrs.push(vb.to_string());
                     cross_dex_vaults += 1;
                 }
-                if pool.dex_type == DexType::MeteoraDlmm {
-                    if let PoolMath::MeteoraDlmm { active_id, .. } = &pool.math {
-                        for pda in decoder::meteora_dlmm::bin_array_pdas_for_swap(pool_addr, *active_id) {
-                            sub_addrs.push(pda.to_string());
-                            streamer.cache().register_tick_array(pda, *pool_addr);
-                            cross_dex_arrays += 1;
-                        }
-                    }
-                }
+                // Skip bin/tick array subscriptions (too many, crashes gRPC).
+                // ArbScanner verifies with fresh RPC data before sending.
             }
         }
     }
