@@ -23,9 +23,9 @@ use solana_streamer_sdk::pool::state::{DexType, PoolMath, PoolState, PoolUpdate}
 use crate::opportunity::{Hop, Opportunity, PoolSnapshot, Route};
 
 const WSOL: Pubkey = solana_sdk::pubkey!("So11111111111111111111111111111111111111112");
-const MIN_SOL_RESERVE: u64 = 5_000_000_000; // 5 SOL
+const MIN_SOL_RESERVE: u64 = 2_000_000_000; // 2 SOL
 const MAX_SPREAD_PCT: f64 = 50.0;
-const MIN_PROFIT_LAMPORTS: i64 = 1_000; // 0.000001 SOL — testing with small amounts
+const MIN_SPREAD_PCT: f64 = 0.3; // < 0.3% can't profit after fees
 
 pub struct ArbScanner {
     cache: Arc<PoolStateCache>,
@@ -141,10 +141,8 @@ impl ArbScanner {
                 None => continue,
             };
 
-            // Must be different DEX
-            if pool_b.dex_type == update.dex_type {
-                continue;
-            }
+            // Skip same pool (same address), but allow same DEX different pool
+            // (e.g. two DLMM pools with different bin_step for same token)
 
             let price_b = match self.get_price(&pool_b) {
                 Some(p) => p,
@@ -164,7 +162,7 @@ impl ArbScanner {
             let sell_price = price_a.min(price_b);
             let spread = (buy_price - sell_price) / sell_price * 100.0;
 
-            if spread > MAX_SPREAD_PCT || spread < 0.1 {
+            if spread > MAX_SPREAD_PCT || spread < MIN_SPREAD_PCT {
                 continue;
             }
 
@@ -195,7 +193,11 @@ impl ArbScanner {
 
             let probe_back = sell_pool.math.get_amount_out(probe_tokens, !sol_is_a_sell);
             let probe_profit = probe_back as i64 - self.probe_amount as i64;
-            if probe_profit <= 0 { continue; }
+
+            // Blind probe: allow up to -0.5% at probe stage.
+            // On-chain PROD MODE validates — revert if actual loss.
+            let probe_threshold = -(self.probe_amount as i64 / 200); // -0.5%
+            if probe_profit < probe_threshold { continue; }
 
             // Dedup: same pair within 2 seconds
             let pair_key = (buy_pool.address, sell_pool.address);
@@ -204,46 +206,18 @@ impl ArbScanner {
                     continue;
                 }
             }
-
-            // Fixed input for testing (0.01 SOL)
-            let best_amount = 10_000_000u64;
-            let best_profit = probe_profit;
-
-            if best_profit < MIN_PROFIT_LAMPORTS {
-                continue;
-            }
-
             self.recent.insert(pair_key, Instant::now());
 
-            // RPC verify: refresh DLMM bin arrays / CP vault balances before sending
-            let verified_buy = self.refresh_pool_data(&buy_pool).await;
-            let verified_sell = self.refresh_pool_data(&sell_pool).await;
-
-            // Re-check profit with fresh data
-            let fresh_tokens = verified_buy.math.get_amount_out(best_amount, sol_is_a_buy);
-            if fresh_tokens == 0 { continue; }
-            let fresh_back = verified_sell.math.get_amount_out(fresh_tokens, !sol_is_a_sell);
-            let fresh_profit = fresh_back as i64 - best_amount as i64;
-
-            if fresh_profit < MIN_PROFIT_LAMPORTS {
-                let scan_us = t_compare.elapsed().as_micros();
-                info!(
-                    "[ARB_STALE] {} | cache_profit={:.6} fresh_profit={:.6} SOL | {}µs",
-                    &token_mint.to_string()[..8],
-                    best_profit as f64 / 1e9, fresh_profit as f64 / 1e9, scan_us,
-                );
-                continue;
-            }
-
-            if let Some(mut opp) = self.build_opportunity(&verified_buy, &verified_sell, fresh_profit as u64) {
+            let best_amount = self.probe_amount;
+            if let Some(mut opp) = self.build_opportunity(buy_pool, sell_pool, probe_profit.max(0) as u64) {
                 opp.amount_in = best_amount;
                 let scan_us = t_compare.elapsed().as_micros();
                 info!(
-                    "[ARB] {} | buy@{:?}({}) sell@{:?}({}) | spread={:.2}% in={:.4} profit={:.6} SOL | scan={}µs",
+                    "[ARB] {} | buy@{:?}({}) sell@{:?}({}) | spread={:.2}% in={:.4} probe_profit={:.6} SOL | scan={}µs",
                     &token_mint.to_string()[..8],
-                    verified_buy.dex_type, &verified_buy.address.to_string()[..8],
-                    verified_sell.dex_type, &verified_sell.address.to_string()[..8],
-                    spread, best_amount as f64 / 1e9, fresh_profit as f64 / 1e9, scan_us,
+                    buy_pool.dex_type, &buy_pool.address.to_string()[..8],
+                    sell_pool.dex_type, &sell_pool.address.to_string()[..8],
+                    spread, best_amount as f64 / 1e9, probe_profit as f64 / 1e9, scan_us,
                 );
                 let _ = self.opportunity_tx.try_send(opp);
                 emitted += 1;
@@ -291,31 +265,37 @@ impl ArbScanner {
         fresh
     }
 
+    /// Get price as tokens-per-SOL ratio.
+    /// CP pools: exact from reserves.
+    /// DLMM/CLMM: use vault balance ratio as proxy (updated from tx meta).
+    /// On-chain PROD MODE validates the actual swap — this is just screening.
     fn get_price(&self, pool: &PoolState) -> Option<f64> {
         let sol_is_a = pool.mint_a == WSOL;
         if !sol_is_a && pool.mint_b != WSOL {
             return None;
         }
 
-        // Filter low-liquidity CP pools
-        if let PoolMath::ConstantProduct { reserve_a, reserve_b, .. } = &pool.math {
-            let sol_reserve = if sol_is_a { *reserve_a } else { *reserve_b };
-            if sol_reserve < MIN_SOL_RESERVE {
-                return None;
+        match &pool.math {
+            PoolMath::ConstantProduct { reserve_a, reserve_b, .. } => {
+                let (sol_res, tok_res) = if sol_is_a {
+                    (*reserve_a, *reserve_b)
+                } else {
+                    (*reserve_b, *reserve_a)
+                };
+                if sol_res < MIN_SOL_RESERVE || tok_res == 0 {
+                    return None;
+                }
+                Some(tok_res as f64 / sol_res as f64 * 1e9)
+            }
+            _ => {
+                // DLMM/CLMM/DammV2/Whirlpool: use get_amount_out as probe
+                // (reads whatever bin/tick data is in cache — may be stale, that's OK)
+                let probe = 10_000_000u64;
+                let out = pool.math.get_amount_out(probe, sol_is_a);
+                if out == 0 { return None; }
+                Some(out as f64 / probe as f64 * 1e9)
             }
         }
-
-        // Filter CLMM/Whirlpool without tick arrays
-        if let PoolMath::Concentrated { tick_arrays, fee_rate, .. } = &pool.math {
-            if tick_arrays.is_empty() || *fee_rate == 0 {
-                return None;
-            }
-        }
-
-        let probe = 10_000_000u64; // 0.01 SOL
-        let out = pool.math.get_amount_out(probe, sol_is_a);
-        if out == 0 { return None; }
-        Some(out as f64 / probe as f64 * 1e9)
     }
 
     /// Ternary search for optimal input amount that maximizes profit.
@@ -384,6 +364,22 @@ impl ArbScanner {
 
         let slot = buy_pool.last_updated_slot.max(sell_pool.last_updated_slot);
 
+        // Detect Token-2022: check cache flags, fallback to mint address heuristic
+        // (pump tokens ending in "pump" are always Token-2022)
+        let detect_2022 = |pool: &PoolState| -> (bool, bool) {
+            let mut a = pool.mint_a_is_2022;
+            let mut b = pool.mint_b_is_2022;
+            if !a && pool.mint_a != WSOL {
+                a = pool.mint_a.to_string().ends_with("pump");
+            }
+            if !b && pool.mint_b != WSOL {
+                b = pool.mint_b.to_string().ends_with("pump");
+            }
+            (a, b)
+        };
+        let (buy_a_2022, buy_b_2022) = detect_2022(buy_pool);
+        let (sell_a_2022, sell_b_2022) = detect_2022(sell_pool);
+
         Some(Opportunity {
             route: Route { hops, base_mint: WSOL },
             amount_in: self.probe_amount,
@@ -395,8 +391,8 @@ impl ArbScanner {
                     mint_a: buy_pool.mint_a,
                     mint_b: buy_pool.mint_b,
                     is_a_to_b: buy_sol_is_a,
-                    mint_a_is_2022: buy_pool.mint_a_is_2022,
-                    mint_b_is_2022: buy_pool.mint_b_is_2022,
+                    mint_a_is_2022: buy_a_2022,
+                    mint_b_is_2022: buy_b_2022,
                     accounts: buy_accounts,
                 },
                 PoolSnapshot {
@@ -405,8 +401,8 @@ impl ArbScanner {
                     mint_a: sell_pool.mint_a,
                     mint_b: sell_pool.mint_b,
                     is_a_to_b: !sell_sol_is_a,
-                    mint_a_is_2022: sell_pool.mint_a_is_2022,
-                    mint_b_is_2022: sell_pool.mint_b_is_2022,
+                    mint_a_is_2022: sell_a_2022,
+                    mint_b_is_2022: sell_b_2022,
                     accounts: sell_accounts,
                 },
             ],
@@ -422,6 +418,26 @@ impl ArbScanner {
         if let Some(va) = pool.vault_a { accounts.push(va); }
         if let Some(vb) = pool.vault_b { accounts.push(vb); }
         accounts.extend_from_slice(&pool.extra_accounts);
+
+        // DLMM: add bin array PDAs (computed from active_id)
+        if pool.dex_type == DexType::MeteoraDlmm {
+            if let PoolMath::MeteoraDlmm { active_id, bin_arrays, .. } = &pool.math {
+                if bin_arrays.is_empty() {
+                    // No bin arrays loaded — compute PDAs from active_id
+                    let pdas = decoder::meteora_dlmm::bin_array_pdas_for_swap(&pool.address, *active_id);
+                    accounts.extend_from_slice(&pdas);
+                } else {
+                    // Use cached bin array PDAs (already in extra_accounts from Phase 3)
+                    // Only add if not already there
+                    let pdas = decoder::meteora_dlmm::bin_array_pdas_for_swap(&pool.address, *active_id);
+                    for pda in &pdas {
+                        if !accounts.contains(pda) {
+                            accounts.push(*pda);
+                        }
+                    }
+                }
+            }
+        }
 
         // CLMM/Whirlpool: add tick array PDAs ordered by swap direction
         if pool.dex_type == DexType::RaydiumClmm || pool.dex_type == DexType::OrcaWhirlpool {
