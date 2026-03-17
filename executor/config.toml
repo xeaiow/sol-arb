@@ -15,7 +15,7 @@ max_hop_fee = 0.02
 min_profit_sol = 0.0001
 max_input_sol = 100.0
 ternary_iterations = 10
-probe_amount_sol = 0.01
+probe_amount_sol = 0.1
 max_profit_ratio = 0.1
 # base_mints = ["So11111111111111111111111111111111111111112", "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v"]
 
@@ -36,12 +36,7 @@ fee_collectors_sol = [
 [jito]
 enabled = true
 block_engine_urls = [
-    "https://mainnet.block-engine.jito.wtf",
-    "https://amsterdam.mainnet.block-engine.jito.wtf",
     "https://frankfurt.mainnet.block-engine.jito.wtf",
-    "https://ny.mainnet.block-engine.jito.wtf",
-    "https://tokyo.mainnet.block-engine.jito.wtf",
-    "https://slc.mainnet.block-engine.jito.wtf",
 ]
 tip_percentage = 60
 min_tip_lamports = 10000
@@ -62,6 +57,7 @@ endpoints = [
 enabled = false
 api_key = "xyz_06iaBUneeAX291ZtQbMoGEMAStUaW9YXyHo2dIrkVSwSZiEspN75RJjTupMN"
 priority_fee_lamports = 100000
+min_tip_lamports = 10000
 endpoints = [
     "https://fr.gateway.astralane.io/iris2",
     "https://fr2.gateway.astralane.io/iris2",
@@ -76,7 +72,7 @@ endpoints = [
 ]
 
 [nozomi]
-enabled = true
+enabled = false
 api_key = "298b5025-d944-4584-ab1c-91872a055323"
 tip_account = "mwGELGMgGGrNL1UibNCQeJHDE7qdPptWRYB6noUHmTj"
 tip_lamports = 1000000

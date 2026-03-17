@@ -84,18 +84,14 @@ impl MultiSender {
         let mut handles: Vec<JoinHandle<()>> = Vec::new();
 
         if let Some(ref tx) = pair.jito_tx {
-            // Serialize once for all Jito endpoints
-            if let Ok(tx_bytes) = bincode::serialize(tx) {
-                let tx_base64 = base64::engine::general_purpose::STANDARD.encode(&tx_bytes);
-                for sender in &self.jito_senders {
-                    let sender = sender.clone();
-                    let b64 = tx_base64.clone();
-                    handles.push(tokio::spawn(async move {
-                        if let Err(e) = sender.send_bundle_raw(&b64).await {
-                            warn!("Jito send failed: {}", e);
-                        }
-                    }));
-                }
+            for sender in &self.jito_senders {
+                let sender = sender.clone();
+                let tx = tx.clone();
+                handles.push(tokio::spawn(async move {
+                    if let Err(e) = sender.send_bundle(&tx).await {
+                        warn!("Jito send failed: {}", e);
+                    }
+                }));
             }
         }
 
@@ -111,19 +107,16 @@ impl MultiSender {
             }
         }
 
-        if let Some(ref tx) = pair.swqos_tx {
-            // Serialize once, share across all Astralane endpoints
-            if let Ok(tx_bytes) = bincode::serialize(tx) {
-                let tx_base64 = base64::engine::general_purpose::STANDARD.encode(&tx_bytes);
-                for sender in &self.astralane_senders {
-                    let sender = sender.clone();
-                    let b64 = tx_base64.clone();
-                    handles.push(tokio::spawn(async move {
-                        if let Err(e) = sender.send_raw(&b64).await {
-                            warn!("Astralane send failed: {}", e);
-                        }
-                    }));
-                }
+        // Astralane: use astralane_tx (has Astralane tip) via sendBundle
+        if let Some(ref tx) = pair.astralane_tx {
+            for sender in &self.astralane_senders {
+                let sender = sender.clone();
+                let tx = tx.clone();
+                handles.push(tokio::spawn(async move {
+                    if let Err(e) = sender.send_bundle(&tx).await {
+                        warn!("Astralane send failed: {}", e);
+                    }
+                }));
             }
         }
 

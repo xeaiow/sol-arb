@@ -86,10 +86,11 @@ fn derive_ata_with_program(owner: &Pubkey, mint: &Pubkey, token_program: &Pubkey
     .0
 }
 
-/// Built transaction pair (VersionedTransaction v0 with ALT)
+/// Built transactions per sender (VersionedTransaction v0 with ALT)
 pub struct TxPair {
-    pub jito_tx: Option<VersionedTransaction>,  // Variant A: with tip, no CU price
-    pub swqos_tx: Option<VersionedTransaction>, // Variant B: with CU price, no tip
+    pub jito_tx: Option<VersionedTransaction>,      // Jito sendBundle: Jito tip account
+    pub astralane_tx: Option<VersionedTransaction>,  // Astralane sendBundle: Astralane tip account
+    pub swqos_tx: Option<VersionedTransaction>,      // Flashblock/Nozomi: CU price + their tips
 }
 
 pub struct TxBuilder {
@@ -104,6 +105,7 @@ pub struct TxBuilder {
     jito_enabled: bool,
     swqos_enabled: bool,
     astralane_enabled: bool,
+    astralane_min_tip: u64,
     alt: Option<Arc<Tier0Alt>>,
     marginfi_state: Option<Arc<MarginFiState>>,
     nozomi_tip: Option<(Pubkey, u64)>,
@@ -147,8 +149,10 @@ impl TxBuilder {
             jito_min_operator_profit: jito.map_or(5000, |j| j.min_operator_profit_lamports),
             swqos_priority_fee: swqos_fee,
             jito_enabled,
-            swqos_enabled: flashblock_enabled || astralane_enabled || nozomi_enabled,
+            swqos_enabled: flashblock_enabled || nozomi_enabled,
             astralane_enabled,
+            astralane_min_tip: config.astralane.as_ref()
+                .and_then(|a| a.min_tip_lamports).unwrap_or(10_000),
             alt: None,
             marginfi_state: None,
             nozomi_tip: config.nozomi.as_ref()
@@ -196,7 +200,7 @@ impl TxBuilder {
         // If accounts are empty (missing required data), return empty TxPair
         if arb_ix.accounts.is_empty() {
             log::warn!("Skipping opportunity: missing required accounts");
-            return TxPair { jito_tx: None, swqos_tx: None };
+            return TxPair { jito_tx: None, astralane_tx: None, swqos_tx: None };
         }
 
         // Create ATA instructions for base mint + all intermediate mints
@@ -212,7 +216,9 @@ impl TxBuilder {
                 // Filter out tip accounts from ALT so they stay in static keys.
                 // Astralane/Nozomi cannot resolve ALT addresses for tip detection.
                 let mut filtered = alt.account.clone();
+                let jito_tips = anti_fp::jito_tip_accounts();
                 filtered.addresses.retain(|addr| {
+                    if jito_tips.contains(addr) { return false; }
                     if *addr == ASTRALANE_TIP_ACCOUNT { return false; }
                     if let Some((ref noz_tip, _)) = self.nozomi_tip {
                         if addr == noz_tip { return false; }
@@ -225,40 +231,56 @@ impl TxBuilder {
 
         // Prepare instruction sets for both variants
         let jito_ixs = if self.jito_enabled {
-            let tip = self.calculate_jito_tip(opp.expected_profit);
-            tip.map(|tip| {
-                let tip_account = anti_fp::random_tip_account();
-                let mut ixs = vec![
-                    ComputeBudgetInstruction::set_compute_unit_limit(cu_limit),
-                ];
-                ixs.extend(create_ata_ixs.clone());
-                if let Some(ref fl) = flashloan_ixs {
-                    ixs.push(fl.start_jito.clone());
-                    ixs.push(fl.borrow.clone());
-                }
-                ixs.push(arb_ix.clone());
-                if let Some(ref fl) = flashloan_ixs {
-                    ixs.push(fl.repay.clone());
-                    ixs.push(fl.end.clone());
-                }
-                ixs.push(system_instruction::transfer(&payer.pubkey(), &tip_account, tip));
-                ixs
-            })
+            let tip = self.jito_min_tip;
+            let tip_account = anti_fp::random_tip_account();
+            let cu_price = self.calculate_cu_price(opp.expected_profit, base_cu);
+            let mut ixs = vec![
+                ComputeBudgetInstruction::set_compute_unit_limit(cu_limit),
+                ComputeBudgetInstruction::set_compute_unit_price(cu_price),
+            ];
+            ixs.extend(create_ata_ixs.clone());
+            if let Some(ref fl) = flashloan_ixs {
+                ixs.push(fl.start_jito.clone());
+                ixs.push(fl.borrow.clone());
+            }
+            ixs.push(arb_ix.clone());
+            if let Some(ref fl) = flashloan_ixs {
+                ixs.push(fl.repay.clone());
+                ixs.push(fl.end.clone());
+            }
+            ixs.push(system_instruction::transfer(&payer.pubkey(), &tip_account, tip));
+            Some(ixs)
         } else {
             None
         };
 
+        // Astralane sendBundle: independent TX with Astralane tip account
+        let astralane_ixs = if self.astralane_enabled {
+            let tip = self.astralane_min_tip;
+            let cu_price = self.calculate_cu_price(opp.expected_profit, base_cu);
+            let mut ixs = vec![
+                ComputeBudgetInstruction::set_compute_unit_limit(cu_limit),
+                ComputeBudgetInstruction::set_compute_unit_price(cu_price),
+            ];
+            ixs.extend(create_ata_ixs.clone());
+            if let Some(ref fl) = flashloan_ixs {
+                ixs.push(fl.start.clone());
+                ixs.push(fl.borrow.clone());
+            }
+            ixs.push(arb_ix.clone());
+            if let Some(ref fl) = flashloan_ixs {
+                ixs.push(fl.repay.clone());
+                ixs.push(fl.end.clone());
+            }
+            ixs.push(system_instruction::transfer(&payer.pubkey(), &ASTRALANE_TIP_ACCOUNT, tip));
+            Some(ixs)
+        } else {
+            None
+        };
+
+        // SwQoS (Flashblock/Nozomi): CU price + their respective tips
         let swqos_ixs = if self.swqos_enabled {
             let cu_price = self.calculate_cu_price(opp.expected_profit, base_cu);
-            let total_priority_fee = cu_price * cu_limit as u64 / 1_000_000;
-            log::info!(
-                "[TX_BUILD] expected_profit={:.6} SOL, priority_fee={} lamports, cu_price={}, cu_limit={}, tip=10000",
-                opp.expected_profit as f64 / 1e9,
-                total_priority_fee,
-                cu_price, cu_limit,
-            );
-            // Astralane requires a SOL transfer tip (min 10000 lamports = 0.00001 SOL)
-            let astralane_tip: u64 = 10_000;
             let mut ixs = vec![
                 ComputeBudgetInstruction::set_compute_unit_limit(cu_limit),
                 ComputeBudgetInstruction::set_compute_unit_price(cu_price),
@@ -273,12 +295,7 @@ impl TxBuilder {
                 ixs.push(fl.repay.clone());
                 ixs.push(fl.end.clone());
             }
-            // Tips: only add for enabled senders
-            if self.astralane_enabled {
-                ixs.push(system_instruction::transfer(&payer.pubkey(), &ASTRALANE_TIP_ACCOUNT, astralane_tip));
-            }
             if let Some((ref tip_account, tip_amount)) = self.nozomi_tip {
-                log::info!("[TX_BUILD] Adding Nozomi tip: {} lamports to {}", tip_amount, &tip_account.to_string()[..12]);
                 ixs.push(system_instruction::transfer(&payer.pubkey(), tip_account, tip_amount));
             }
             Some(ixs)
@@ -286,48 +303,32 @@ impl TxBuilder {
             None
         };
 
-        // Parallel signing with rayon::join
+        // Compile & sign helper
         let payer_pubkey = payer.pubkey();
-        let (jito_tx, swqos_tx) = rayon::join(
-            || {
-                jito_ixs.as_ref().and_then(|ixs| {
-                    match message::v0::Message::try_compile(
-                        &payer_pubkey,
-                        ixs,
-                        &lookup_tables,
-                        recent_blockhash,
-                    ) {
-                        Ok(msg) => VersionedTransaction::try_new(VersionedMessage::V0(msg), &[payer])
-                            .map_err(|e| log::warn!("Jito tx sign failed: {}", e))
-                            .ok(),
-                        Err(e) => {
-                            log::warn!("Jito tx compile failed: {}", e);
-                            None
-                        }
+        let compile_and_sign = |ixs: &Option<Vec<Instruction>>, label: &str| -> Option<VersionedTransaction> {
+            ixs.as_ref().and_then(|ixs| {
+                match message::v0::Message::try_compile(
+                    &payer_pubkey,
+                    ixs,
+                    &lookup_tables,
+                    recent_blockhash,
+                ) {
+                    Ok(msg) => VersionedTransaction::try_new(VersionedMessage::V0(msg), &[payer])
+                        .map_err(|e| log::warn!("{} tx sign failed: {}", label, e))
+                        .ok(),
+                    Err(e) => {
+                        log::warn!("{} tx compile failed: {}", label, e);
+                        None
                     }
-                })
-            },
-            || {
-                swqos_ixs.as_ref().and_then(|ixs| {
-                    match message::v0::Message::try_compile(
-                        &payer_pubkey,
-                        ixs,
-                        &lookup_tables,
-                        recent_blockhash,
-                    ) {
-                        Ok(msg) => VersionedTransaction::try_new(VersionedMessage::V0(msg), &[payer])
-                            .map_err(|e| log::warn!("SwQoS tx sign failed: {}", e))
-                            .ok(),
-                        Err(e) => {
-                            log::warn!("SwQoS tx compile failed: {}", e);
-                            None
-                        }
-                    }
-                })
-            },
-        );
+                }
+            })
+        };
 
-        TxPair { jito_tx, swqos_tx }
+        let jito_tx = compile_and_sign(&jito_ixs, "Jito");
+        let astralane_tx = compile_and_sign(&astralane_ixs, "Astralane");
+        let swqos_tx = compile_and_sign(&swqos_ixs, "SwQoS");
+
+        TxPair { jito_tx, astralane_tx, swqos_tx }
     }
 
     fn build_arb_instruction(&self, opp: &Opportunity) -> Instruction {
@@ -971,13 +972,10 @@ impl TxBuilder {
         }
     }
 
-    fn calculate_jito_tip(&self, expected_profit: u64) -> Option<u64> {
-        let tip = expected_profit * self.jito_tip_percentage as u64 / 100;
-        let tip = tip.max(self.jito_min_tip);
-        if tip + self.jito_min_operator_profit > expected_profit {
-            return None; // Not profitable enough
-        }
-        Some(tip)
+    fn calculate_jito_tip(&self, _expected_profit: u64) -> Option<u64> {
+        // Blind probe strategy: always use min tip.
+        // On-chain PROD MODE validates actual profit — no need to gate on expected_profit.
+        Some(self.jito_min_tip)
     }
 
 
