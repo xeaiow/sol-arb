@@ -394,6 +394,7 @@ pub async fn bootstrap_pools(streamer: &Arc<PoolStreamer>, gpa_rpc_url: &str) {
     // so gRPC pushes real-time vault balance updates. This enables
     // cache-only price comparison without RPC fetches.
     let mut cross_dex_vaults = 0usize;
+    let mut cross_dex_arrays = 0usize;
     for mint in &multi_dex_mints {
         let pool_addrs = cache.pools_for_mint(mint);
         if pool_addrs.len() < 2 {
@@ -401,6 +402,7 @@ pub async fn bootstrap_pools(streamer: &Arc<PoolStreamer>, gpa_rpc_url: &str) {
         }
         for pool_addr in &pool_addrs {
             if let Some(pool) = cache.get(pool_addr) {
+                // Subscribe vaults (for CP pool reserve updates)
                 if let Some(va) = pool.vault_a {
                     streamer.queue_subscription(va.to_string()).await;
                     cross_dex_vaults += 1;
@@ -409,16 +411,53 @@ pub async fn bootstrap_pools(streamer: &Arc<PoolStreamer>, gpa_rpc_url: &str) {
                     streamer.queue_subscription(vb.to_string()).await;
                     cross_dex_vaults += 1;
                 }
+
+                // Subscribe DLMM bin array accounts
+                if pool.dex_type == DexType::MeteoraDlmm {
+                    if let PoolMath::MeteoraDlmm { active_id, .. } = &pool.math {
+                        for pda in decoder::meteora_dlmm::bin_array_pdas_for_swap(pool_addr, *active_id) {
+                            streamer.queue_subscription(pda.to_string()).await;
+                            streamer.cache().register_tick_array(pda, *pool_addr);
+                            cross_dex_arrays += 1;
+                        }
+                    }
+                }
+
+                // Subscribe CLMM tick array accounts
+                if pool.dex_type == DexType::RaydiumClmm {
+                    if let PoolMath::Concentrated { tick_current, tick_spacing, .. } = &pool.math {
+                        for start in decoder::raydium_clmm::tick_array_start_indices(*tick_current, *tick_spacing) {
+                            if let Some(pda) = decoder::raydium_clmm::tick_array_pda(pool_addr, start) {
+                                streamer.queue_subscription(pda.to_string()).await;
+                                streamer.cache().register_tick_array(pda, *pool_addr);
+                                cross_dex_arrays += 1;
+                            }
+                        }
+                    }
+                }
+
+                // Subscribe Whirlpool tick array accounts
+                if pool.dex_type == DexType::OrcaWhirlpool {
+                    if let PoolMath::Concentrated { tick_current, tick_spacing, .. } = &pool.math {
+                        for start in decoder::orca_whirlpool::tick_array_start_indices(*tick_current, *tick_spacing) {
+                            if let Some(pda) = decoder::orca_whirlpool::tick_array_pda(pool_addr, start) {
+                                streamer.queue_subscription(pda.to_string()).await;
+                                streamer.cache().register_tick_array(pda, *pool_addr);
+                                cross_dex_arrays += 1;
+                            }
+                        }
+                    }
+                }
             }
         }
     }
-    if cross_dex_vaults > 0 {
+    if cross_dex_vaults + cross_dex_arrays > 0 {
         streamer.subscription_dirty().store(true, std::sync::atomic::Ordering::Release);
         streamer.subscription_notify().notify_waiters();
     }
     info!(
-        "[GPA] Phase 5: queued {} cross-DEX vault subscriptions for {} multi-DEX mints",
-        cross_dex_vaults, multi_dex_mints.len(),
+        "[GPA] Phase 5: queued {} vault + {} bin/tick array subscriptions for {} multi-DEX mints",
+        cross_dex_vaults, cross_dex_arrays, multi_dex_mints.len(),
     );
 
     info!(
