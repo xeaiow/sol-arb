@@ -827,6 +827,12 @@ impl PoolStreamer {
         self.pending_subscriptions.lock().await.push(address);
     }
 
+    /// Queue many subscription addresses at once (single lock).
+    pub async fn queue_subscriptions_batch(&self, addresses: Vec<String>) {
+        let mut pending = self.pending_subscriptions.lock().await;
+        pending.extend(addresses);
+    }
+
     /// Drain pending subscription addresses (call before update_subscription)
     pub async fn drain_pending_subscriptions(&self) -> Vec<String> {
         let mut pending = self.pending_subscriptions.lock().await;

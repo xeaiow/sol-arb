@@ -393,47 +393,41 @@ pub async fn bootstrap_pools(streamer: &Arc<PoolStreamer>, gpa_rpc_url: &str) {
     // For tokens with pools on 2+ DEXes, subscribe all vault addresses
     // so gRPC pushes real-time vault balance updates. This enables
     // cache-only price comparison without RPC fetches.
+    let mut sub_addrs: Vec<String> = Vec::new();
     let mut cross_dex_vaults = 0usize;
     let mut cross_dex_arrays = 0usize;
     for mint in &multi_dex_mints {
         let pool_addrs = cache.pools_for_mint(mint);
-        if pool_addrs.len() < 2 {
-            continue;
-        }
+        if pool_addrs.len() < 2 { continue; }
         for pool_addr in &pool_addrs {
             if let Some(pool) = cache.get(pool_addr) {
-                // Subscribe vaults (for CP pool reserve updates)
                 if let Some(va) = pool.vault_a {
-                    streamer.queue_subscription(va.to_string()).await;
+                    sub_addrs.push(va.to_string());
                     cross_dex_vaults += 1;
                 }
                 if let Some(vb) = pool.vault_b {
-                    streamer.queue_subscription(vb.to_string()).await;
+                    sub_addrs.push(vb.to_string());
                     cross_dex_vaults += 1;
                 }
-
-                // Subscribe DLMM bin array accounts (3 per pool, most important for arb)
                 if pool.dex_type == DexType::MeteoraDlmm {
                     if let PoolMath::MeteoraDlmm { active_id, .. } = &pool.math {
                         for pda in decoder::meteora_dlmm::bin_array_pdas_for_swap(pool_addr, *active_id) {
-                            streamer.queue_subscription(pda.to_string()).await;
+                            sub_addrs.push(pda.to_string());
                             streamer.cache().register_tick_array(pda, *pool_addr);
                             cross_dex_arrays += 1;
                         }
                     }
                 }
-                // CLMM/Whirlpool tick arrays: skip explicit subscription (too many).
-                // Their pool accounts are covered by owner filter, and tick arrays
-                // are fetched on-demand when pool state changes.
             }
         }
     }
-    if cross_dex_vaults + cross_dex_arrays > 0 {
+    if !sub_addrs.is_empty() {
+        streamer.queue_subscriptions_batch(sub_addrs).await;
         streamer.subscription_dirty().store(true, std::sync::atomic::Ordering::Release);
         streamer.subscription_notify().notify_waiters();
     }
     info!(
-        "[GPA] Phase 5: queued {} vault + {} bin/tick array subscriptions for {} multi-DEX mints",
+        "[GPA] Phase 5: queued {} vault + {} bin array subscriptions for {} multi-DEX mints",
         cross_dex_vaults, cross_dex_arrays, multi_dex_mints.len(),
     );
 
