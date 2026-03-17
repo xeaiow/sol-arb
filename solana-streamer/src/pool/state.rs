@@ -556,8 +556,12 @@ fn dlmm_get_amount_out(
 
     // Track current active_id (moves as we consume bins)
     let mut current_active_id = active_id;
-    // Track volatility_accumulator (updates per-bin crossing)
-    let mut vol_acc = volatility_reference as u64; // start from reference
+    // Simulate update_references: for most pools, enough time has passed
+    // since last trade that volatility_reference decays to 0 and
+    // index_reference resets to active_id. This means delta_id starts at 0
+    // and variable fee only grows as we cross bins away from start.
+    let effective_vol_ref: u64 = 0;
+    let effective_idx_ref: i32 = active_id;
 
     let relevant: Vec<&&DlmmBin> = if swap_for_y {
         all_bins.iter()
@@ -572,9 +576,9 @@ fn dlmm_get_amount_out(
     for bin in relevant {
         if remaining == 0 { break; }
 
-        // [Fix 1] Update volatility_accumulator per bin (on-chain does this)
-        let delta_id = (index_reference as i64 - current_active_id as i64).unsigned_abs();
-        vol_acc = (volatility_reference as u64 + delta_id * BASIS_POINT_MAX)
+        // Update volatility_accumulator per bin crossing (on-chain does this)
+        let delta_id = (effective_idx_ref as i64 - current_active_id as i64).unsigned_abs();
+        let vol_acc = (effective_vol_ref + delta_id * BASIS_POINT_MAX)
             .min(max_volatility_accumulator as u64);
 
         // Compute fee rate with updated volatility
