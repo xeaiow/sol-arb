@@ -20,7 +20,7 @@ max_profit_ratio = 0.1
 # base_mints = ["So11111111111111111111111111111111111111112", "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v"]
 
 [executor]
-flashloan_enabled = true
+flashloan_enabled = false
 program_id = "8NwGVcMu96JTJwfUKQNXjYMd87JyGWcPkaENe9NPzLCV"
 alt_address = "Eppmrwxw2nY6PbKdG8ANUA3EarHJSoXpfDa2u4euCyWu"
 fallback_rpc_url = "https://beta.helius-rpc.com/?api-key=89ed37ec-971c-48e0-99db-921d568354e6"

@@ -200,7 +200,13 @@ impl TxBuilder {
         let lookup_tables: Vec<AddressLookupTableAccount> = self
             .alt
             .as_ref()
-            .map(|alt| vec![alt.account.clone()])
+            .map(|alt| {
+                // Filter out Astralane tip account from ALT so it stays in static keys.
+                // Astralane Iris cannot resolve ALT addresses for tip detection.
+                let mut filtered = alt.account.clone();
+                filtered.addresses.retain(|addr| *addr != ASTRALANE_TIP_ACCOUNT);
+                vec![filtered]
+            })
             .unwrap_or_default();
 
         // Prepare instruction sets for both variants
@@ -231,10 +237,10 @@ impl TxBuilder {
         let swqos_ixs = if self.swqos_enabled {
             let cu_price = self.calculate_cu_price(opp.expected_profit, base_cu);
             let total_priority_fee = cu_price * cu_limit as u64 / 1_000_000;
-            log::debug!(
-                "SwQoS tx: expected_profit={:.6} SOL, priority_fee={:.6} SOL, cu_price={}, cu_limit={}",
+            log::info!(
+                "[TX_BUILD] expected_profit={:.6} SOL, priority_fee={} lamports, cu_price={}, cu_limit={}, tip=10000",
                 opp.expected_profit as f64 / 1e9,
-                total_priority_fee as f64 / 1e9,
+                total_priority_fee,
                 cu_price, cu_limit,
             );
             // Astralane requires a SOL transfer tip (min 10000 lamports = 0.00001 SOL)
