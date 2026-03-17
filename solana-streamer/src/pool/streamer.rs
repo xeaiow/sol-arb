@@ -122,6 +122,39 @@ impl PoolStreamer {
 
     /// Process a DexEvent — handles discovery, state updates, and vault balance updates
     pub async fn on_event(&self, event: DexEvent) {
+        // Latency measurement: use event metadata
+        {
+            use std::sync::atomic::AtomicI64;
+            static LAST_LOG: AtomicI64 = AtomicI64::new(0);
+            let now_ms = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH).unwrap().as_millis() as i64;
+            let last = LAST_LOG.load(Ordering::Relaxed);
+            // Log once per second
+            if now_ms - last > 1000 {
+                if LAST_LOG.compare_exchange(last, now_ms, Ordering::Relaxed, Ordering::Relaxed).is_ok() {
+                    let meta = match &event {
+                        DexEvent::PumpSwapBuyEvent(e) => Some(("PumpSwap", &e.metadata)),
+                        DexEvent::PumpSwapSellEvent(e) => Some(("PumpSwap", &e.metadata)),
+                        DexEvent::RaydiumCpmmSwapEvent(e) => Some(("CPMM", &e.metadata)),
+                        DexEvent::MeteoraDlmmSwap2Event(e) => Some(("DLMM", &e.metadata)),
+                        DexEvent::RaydiumClmmSwapEvent(e) => Some(("CLMM", &e.metadata)),
+                        _ => None,
+                    };
+                    if let Some((dex, m)) = meta {
+                        let lag_ms = if m.block_time_ms > 0 {
+                            now_ms - m.block_time_ms
+                        } else if m.block_time > 0 {
+                            (now_ms / 1000 - m.block_time) * 1000
+                        } else {
+                            -1
+                        };
+                        info!("[GRPC_LAG] slot={} lag={}ms dex={} sig={}",
+                            m.slot, lag_ms, dex, &m.signature.to_string()[..16]);
+                    }
+                }
+            }
+        }
+
         // 1. Try pool discovery from transaction events
         if let Some(discovered) = discovery::discover_pool(&event) {
             self.handle_discovery(discovered).await;

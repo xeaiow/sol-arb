@@ -2,6 +2,7 @@ pub mod jito;
 pub mod flashblock;
 pub mod astralane;
 pub mod astralane_quic;
+pub mod nozomi;
 
 use base64::Engine as _;
 use log::{info, warn};
@@ -15,6 +16,7 @@ pub struct MultiSender {
     jito_senders: Vec<jito::JitoSender>,
     flashblock_senders: Vec<flashblock::FlashblockSender>,
     astralane_senders: Vec<astralane::AstralaneSender>,
+    nozomi_senders: Vec<nozomi::NozomiSender>,
 }
 
 impl MultiSender {
@@ -52,17 +54,28 @@ impl MultiSender {
             }
         }
 
+        let mut nozomi_senders = Vec::new();
+        if let Some(noz_cfg) = &config.nozomi {
+            if noz_cfg.enabled {
+                for region in &noz_cfg.regions {
+                    nozomi_senders.push(nozomi::NozomiSender::new(&noz_cfg.api_key, region));
+                }
+            }
+        }
+
         info!(
-            "MultiSender initialized: {} Jito, {} Flashblock, {} Astralane endpoints",
+            "MultiSender initialized: {} Jito, {} Flashblock, {} Astralane, {} Nozomi endpoints",
             jito_senders.len(),
             flashblock_senders.len(),
             astralane_senders.len(),
+            nozomi_senders.len(),
         );
 
         Self {
             jito_senders,
             flashblock_senders,
             astralane_senders,
+            nozomi_senders,
         }
     }
 
@@ -108,6 +121,22 @@ impl MultiSender {
                     handles.push(tokio::spawn(async move {
                         if let Err(e) = sender.send_raw(&b64).await {
                             warn!("Astralane send failed: {}", e);
+                        }
+                    }));
+                }
+            }
+        }
+
+        // Nozomi: send swqos_tx via API v2 (fastest)
+        if let Some(ref tx) = pair.swqos_tx {
+            if let Ok(tx_bytes) = bincode::serialize(tx) {
+                let tx_base64 = base64::engine::general_purpose::STANDARD.encode(&tx_bytes);
+                for sender in &self.nozomi_senders {
+                    let sender = sender.clone();
+                    let b64 = tx_base64.clone();
+                    handles.push(tokio::spawn(async move {
+                        if let Err(e) = sender.send_raw(&b64).await {
+                            warn!("Nozomi send failed: {}", e);
                         }
                     }));
                 }

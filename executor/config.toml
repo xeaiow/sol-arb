@@ -74,3 +74,10 @@ endpoints = [
     "https://lim.gateway.astralane.io/iris2",
     "https://lit.gateway.astralane.io/iris2",
 ]
+
+[nozomi]
+enabled = true
+api_key = "298b5025-d944-4584-ab1c-91872a055323"
+tip_account = "mwGELGMgGGrNL1UibNCQeJHDE7qdPptWRYB6noUHmTj"
+tip_lamports = 1000000
+regions = [""]

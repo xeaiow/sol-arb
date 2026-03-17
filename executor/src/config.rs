@@ -8,6 +8,7 @@ pub struct ExecutorConfigFile {
     pub jito: Option<JitoConfig>,
     pub flashblock: Option<FlashblockConfig>,
     pub astralane: Option<AstralaneConfig>,
+    pub nozomi: Option<NozomiConfig>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -77,6 +78,15 @@ pub struct AstralaneConfig {
     pub api_key: String,
     pub priority_fee_lamports: Option<u64>,
     pub endpoints: Vec<String>,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct NozomiConfig {
+    pub enabled: bool,
+    pub api_key: String,
+    pub tip_account: String,
+    pub tip_lamports: Option<u64>,
+    pub regions: Vec<String>,
 }
 
 /// Convert SOL (f64) to lamports (u64)

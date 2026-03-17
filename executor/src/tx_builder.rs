@@ -105,6 +105,7 @@ pub struct TxBuilder {
     swqos_enabled: bool,
     alt: Option<Arc<Tier0Alt>>,
     marginfi_state: Option<Arc<MarginFiState>>,
+    nozomi_tip: Option<(Pubkey, u64)>,
     /// Test mode: skip profit verification on-chain (discriminator +3)
     pub test_mode: bool,
 }
@@ -124,6 +125,7 @@ impl TxBuilder {
 
         let flashblock_enabled = config.flashblock.as_ref().map_or(false, |f| f.enabled);
         let astralane_enabled = config.astralane.as_ref().map_or(false, |a| a.enabled);
+        let nozomi_enabled = config.nozomi.as_ref().map_or(false, |n| n.enabled);
 
         // Fixed priority fee: take from flashblock or astralane config, default 100k lamports (0.0001 SOL)
         let swqos_fee = config
@@ -144,9 +146,13 @@ impl TxBuilder {
             jito_min_operator_profit: jito.map_or(5000, |j| j.min_operator_profit_lamports),
             swqos_priority_fee: swqos_fee,
             jito_enabled,
-            swqos_enabled: flashblock_enabled || astralane_enabled,
+            swqos_enabled: flashblock_enabled || astralane_enabled || nozomi_enabled,
             alt: None,
             marginfi_state: None,
+            nozomi_tip: config.nozomi.as_ref()
+                .filter(|n| n.enabled)
+                .and_then(|n| n.tip_account.parse::<Pubkey>().ok()
+                    .map(|a| (a, n.tip_lamports.unwrap_or(1_000_000)))),
             test_mode: false,
         }
     }
@@ -201,10 +207,16 @@ impl TxBuilder {
             .alt
             .as_ref()
             .map(|alt| {
-                // Filter out Astralane tip account from ALT so it stays in static keys.
-                // Astralane Iris cannot resolve ALT addresses for tip detection.
+                // Filter out tip accounts from ALT so they stay in static keys.
+                // Astralane/Nozomi cannot resolve ALT addresses for tip detection.
                 let mut filtered = alt.account.clone();
-                filtered.addresses.retain(|addr| *addr != ASTRALANE_TIP_ACCOUNT);
+                filtered.addresses.retain(|addr| {
+                    if *addr == ASTRALANE_TIP_ACCOUNT { return false; }
+                    if let Some((ref noz_tip, _)) = self.nozomi_tip {
+                        if addr == noz_tip { return false; }
+                    }
+                    true
+                });
                 vec![filtered]
             })
             .unwrap_or_default();
@@ -260,6 +272,10 @@ impl TxBuilder {
                 ixs.push(fl.end.clone());
             }
             ixs.push(system_instruction::transfer(&payer.pubkey(), &ASTRALANE_TIP_ACCOUNT, astralane_tip));
+            // Nozomi tip
+            if let Some((ref tip_account, tip_amount)) = self.nozomi_tip {
+                ixs.push(system_instruction::transfer(&payer.pubkey(), tip_account, tip_amount));
+            }
             Some(ixs)
         } else {
             None
