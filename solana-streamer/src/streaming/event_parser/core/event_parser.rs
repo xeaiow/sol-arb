@@ -53,8 +53,10 @@ impl EventParser {
                     yellowstone_grpc_proto::solana::storage::confirmed_block::InnerInstructions,
                 > = vec![];
 
+                let mut post_token_balances = vec![];
                 if let Some(meta) = grpc_tx.meta {
                     inner_instructions = meta.inner_instructions;
+                    post_token_balances = meta.post_token_balances;
                     address_table_lookups.reserve(
                         meta.loaded_writable_addresses.len() + meta.loaded_readonly_addresses.len(),
                     );
@@ -87,6 +89,7 @@ impl EventParser {
                 } else {
                     Some(bs58::encode(&message.recent_blockhash).into_string())
                 };
+                let adapter_cb2 = adapter_callback.clone();
                 Self::parse_instruction_events_from_grpc_transaction(
                     protocols,
                     event_type_filter,
@@ -103,6 +106,40 @@ impl EventParser {
                     adapter_callback,
                 )
                 .await?;
+                let adapter_callback = adapter_cb2;
+
+                // Emit vault balance updates from post_token_balances
+                // This replaces explicit vault account subscriptions.
+                if !post_token_balances.is_empty() {
+                    let event_slot = slot.unwrap_or(0);
+                    let bt = block_time.map(|t| t.seconds).unwrap_or(0);
+                    for tb in &post_token_balances {
+                        let account_idx = tb.account_index as usize;
+                        if account_idx >= accounts.len() { continue; }
+                        let vault_pubkey = accounts[account_idx];
+                        if let Some(ref ui_amount) = tb.ui_token_amount {
+                            if let Ok(amount) = ui_amount.amount.parse::<u64>() {
+                                let mut meta = EventMetadata::default();
+                                meta.slot = event_slot;
+                                meta.block_time = bt;
+                                meta.signature = signature;
+                                let event = DexEvent::TokenAccountEvent(
+                                    super::account_event_parser::TokenAccountEvent {
+                                        metadata: meta,
+                                        pubkey: vault_pubkey,
+                                        executable: false,
+                                        lamports: 0,
+                                        owner: Pubkey::default(),
+                                        rent_epoch: 0,
+                                        amount: Some(amount),
+                                        token_owner: Pubkey::default(),
+                                    }
+                                );
+                                adapter_callback(&event);
+                            }
+                        }
+                    }
+                }
             }
         }
 

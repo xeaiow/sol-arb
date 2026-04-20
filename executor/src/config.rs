@@ -77,6 +77,7 @@ pub struct AstralaneConfig {
     pub enabled: bool,
     pub api_key: String,
     pub priority_fee_lamports: Option<u64>,
+    pub min_tip_lamports: Option<u64>,
     pub endpoints: Vec<String>,
 }
 

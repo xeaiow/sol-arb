@@ -367,6 +367,32 @@ impl PoolStateCache {
     }
 
     /// Re-emit a pool's current state to the engine channel.
+    /// Replace bin arrays for a DLMM pool and emit update.
+    /// Used by vault-driven bin array refresh.
+    pub fn replace_bin_arrays_simple(&self, pool_address: &Pubkey, bin_arrays: Vec<DlmmBinArray>, slot: u64) {
+        if let Some(mut pool) = self.pools.get_mut(pool_address) {
+            if let PoolMath::MeteoraDlmm { bin_arrays: ref mut ba, .. } = pool.math {
+                *ba = bin_arrays;
+            }
+            pool.last_updated_slot = slot;
+
+            let update = PoolUpdate {
+                pool_address: pool.address,
+                dex_type: pool.dex_type,
+                mint_a: pool.mint_a,
+                mint_b: pool.mint_b,
+                vault_a: pool.vault_a,
+                vault_b: pool.vault_b,
+                mint_a_is_2022: pool.mint_a_is_2022,
+                mint_b_is_2022: pool.mint_b_is_2022,
+                extra_accounts: pool.extra_accounts.clone(),
+                math: pool.math.clone(),
+                slot,
+            };
+            let _ = self.update_tx.try_send(update);
+        }
+    }
+
     pub fn re_emit_pool(&self, pool: &PoolState) {
         let update = PoolUpdate {
             pool_address: pool.address,

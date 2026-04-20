@@ -16,6 +16,10 @@ static JITO_TIP_PUBKEYS: LazyLock<[Pubkey; 8]> = LazyLock::new(|| {
     ]
 });
 
+pub fn jito_tip_accounts() -> &'static [Pubkey; 8] {
+    &JITO_TIP_PUBKEYS
+}
+
 pub fn random_tip_account() -> Pubkey {
     let mut rng = rand::thread_rng();
     let idx = rng.gen_range(0..8);

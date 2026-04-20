@@ -13,7 +13,7 @@ use solana_sdk::signer::Signer;
 use arb_engine::opportunity::{Hop, Opportunity, PoolSnapshot, Route};
 use arb_executor::config::ExecutorConfigFile;
 use arb_executor::tx_builder::TxBuilder;
-use arb_executor::sender::astralane::AstralaneSender;
+use arb_executor::sender::jito::JitoSender;
 use solana_streamer_sdk::pool::decoder;
 use solana_streamer_sdk::pool::state::{DexType, PoolMath, PoolState};
 
@@ -219,7 +219,8 @@ async fn test_cross(
     let blockhash = rpc.get_latest_blockhash().await?;
     let pair = tx_builder.build(&opp, payer, blockhash);
 
-    if let Some(ref tx) = pair.swqos_tx {
+    let tx = pair.jito_tx.as_ref().or(pair.swqos_tx.as_ref());
+    if let Some(tx) = tx {
         let tx_bytes = bincode::serialize(tx)?;
         println!("  TX: {} bytes, sig={}", tx_bytes.len(), tx.signatures[0]);
         if tx_bytes.len() > 1232 {
@@ -227,9 +228,14 @@ async fn test_cross(
             return Ok(());
         }
 
-        let ast_cfg = config.astralane.as_ref().unwrap();
-        let sender = AstralaneSender::new(ast_cfg.endpoints[0].clone(), ast_cfg.api_key.clone());
-        sender.send_transaction(tx).await?;
+        let sender = JitoSender::new("https://frankfurt.mainnet.block-engine.jito.wtf".to_string());
+        match sender.send_bundle(tx).await {
+            Ok(()) => {}
+            Err(e) => {
+                println!("  Jito failed: {}, trying RPC...", e);
+                rpc.send_transaction(tx).await?;
+            }
+        }
 
         tokio::time::sleep(std::time::Duration::from_secs(15)).await;
         match rpc.get_signature_status(&tx.signatures[0]).await? {
