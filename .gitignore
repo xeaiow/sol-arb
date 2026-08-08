@@ -27,3 +27,13 @@ executor/config.toml
 
 # Claude Code
 .claude/
+
+# Wallet keypair - NEVER commit
+executor/id.json
+
+# Build artifacts
+executor/full_pipeline
+
+# Logs
+executor/log.txt
+*.log
